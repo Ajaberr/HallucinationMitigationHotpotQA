@@ -844,14 +844,28 @@ def main():
     print(f"Policy Model: {rl_config.policy_model_name}")
     rl_trainer = SimpleRLTrainer(rl_config, reward_model)
 
-    # Create example questions
-    print("\nCreating example questions...")
-    example_prompts = create_example_prompts()
-    print(f"Question count: {len(example_prompts)}")
+    # Load HotpotQA training data (100 samples)
+    print("\nLoading HotpotQA training data (100 samples)...")
+    from datasets import load_dataset
+
+    dataset = load_dataset("hotpot_qa", "fullwiki", split="train")
+    dataset = dataset.select(range(100))
+
+    training_prompts = []
+    for example in dataset:
+        question = example['question']
+        # Format as closed-book QA prompt
+        prompt = f"""You are an expert at giving concise answers. Do not give any explanations, only a short answer.
+
+Question: {question}
+Answer: """
+        training_prompts.append(prompt)
+
+    print(f"Loaded {len(training_prompts)} training questions from HotpotQA")
 
     # Train policy with REINFORCE
-    print("\nTraining policy with REINFORCE + verifier rewards...")
-    rl_metrics = rl_trainer.train(example_prompts)
+    print("\nTraining policy with REINFORCE + verifier rewards (100 samples)...")
+    rl_metrics = rl_trainer.train(training_prompts)
 
     print(f"\nTraining Results:")
     print(f"Final RL Loss: {rl_metrics['losses'][-1]:.4f}")

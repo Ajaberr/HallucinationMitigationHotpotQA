@@ -642,9 +642,9 @@ def main():
     parser.add_argument(
         '--mode',
         type=str,
-        choices=['baseline', 'rlhf', 'compare', 'compare_baseline'],
+        choices=['baseline', 'rlhf', 'compare', 'compare_baseline', 'all'],
         default=None,
-        help='Evaluation mode: baseline (vanilla), rlhf (trained), compare (RLHF models), compare_baseline (baseline vs RLHF). Default: auto-detect based on arguments'
+        help='Evaluation mode: baseline (vanilla), rlhf (trained), compare (RLHF models), compare_baseline (baseline vs RLHF), all (evaluate all 3: baseline + base RL + anti-halluc RL). Default: auto-detect based on arguments'
     )
 
     # Baseline model
@@ -765,6 +765,90 @@ def main():
             args.model_type,
             num_samples=args.num_samples
         )
+
+    elif args.mode == 'all':
+        # Evaluate all 3 models: baseline, base RL, anti-hallucination RL
+        print("\n" + "="*70)
+        print("EVALUATING ALL MODELS: Baseline + Base RL + Anti-Hallucination RL")
+        print("="*70)
+
+        # Load data once
+        questions, gold_answers = load_hotpotqa_data(split=args.split, num_samples=args.num_samples)
+        if not questions:
+            return
+
+        # 1. Baseline (no RL)
+        print("\n" + "="*70)
+        print("1/3: BASELINE MODEL (No RLHF)")
+        print("="*70)
+        baseline_results = evaluate_baseline(
+            args.model,
+            questions=questions,
+            gold_answers=gold_answers,
+            verbose=False
+        )
+
+        # 2. Base RL
+        base_rl_results = {}
+        if args.policy_path and BASE_AVAILABLE:
+            print("\n" + "="*70)
+            print("2/3: BASE RLHF MODEL")
+            print("="*70)
+            base_rl_results = evaluate_rlhf_base(
+                args.policy_path,
+                args.reward_path,
+                questions=questions,
+                gold_answers=gold_answers
+            )
+        else:
+            print("\n[Skipping Base RL - no policy_path provided or base_simple_reward.py unavailable]")
+
+        # 3. Anti-Hallucination RL
+        custom_rl_results = {}
+        if args.custom_policy_path and CUSTOM_AVAILABLE:
+            print("\n" + "="*70)
+            print("3/3: ANTI-HALLUCINATION RLHF MODEL")
+            print("="*70)
+            custom_rl_results = evaluate_rlhf_custom(
+                args.custom_policy_path,
+                args.custom_reward_path,
+                questions=questions,
+                gold_answers=gold_answers
+            )
+        else:
+            print("\n[Skipping Anti-Hallucination RL - no custom_policy_path provided or custom_simple_reward.py unavailable]")
+
+        # Print comprehensive comparison
+        print("\n" + "="*70)
+        print("COMPREHENSIVE COMPARISON - ALL MODELS")
+        print("="*70)
+
+        results = {
+            'baseline': baseline_results,
+            'base_rl': base_rl_results,
+            'custom_rl': custom_rl_results
+        }
+
+        print("\nMetric          | Baseline   | Base RL    | Anti-Halluc RL | RL vs Base | Custom vs Base")
+        print("-" * 95)
+
+        for metric in ['EM', 'F1', 'Precision', 'Recall']:
+            baseline_val = baseline_results.get(metric, 0.0)
+            base_rl_val = base_rl_results.get(metric, 0.0) if base_rl_results else 0.0
+            custom_rl_val = custom_rl_results.get(metric, 0.0) if custom_rl_results else 0.0
+
+            rl_diff = base_rl_val - baseline_val
+            custom_diff = custom_rl_val - baseline_val
+
+            print(f"{metric:15} | {baseline_val:10.2f} | {base_rl_val:10.2f} | {custom_rl_val:14.2f} | {rl_diff:+10.2f} | {custom_diff:+14.2f}")
+
+        if base_rl_results and 'Avg_Reward' in base_rl_results:
+            print(f"\nBase RL Reward: {base_rl_results['Avg_Reward']:.4f}")
+        if custom_rl_results and 'Avg_Base_Reward' in custom_rl_results:
+            print(f"Anti-Halluc RL Reward: {custom_rl_results['Avg_Base_Reward']:.4f}")
+            if 'Avg_Halluc_Score' in custom_rl_results:
+                print(f"Hallucination Score: {custom_rl_results['Avg_Halluc_Score']:.4f}")
+                print(f"Abstention Rate: {custom_rl_results.get('Abstention_Rate', 0.0):.2f}%")
 
     # Save results if output path provided
     if args.output and results:

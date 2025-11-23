@@ -147,23 +147,148 @@ class EntropyConfidenceCalculator:
         return conf
 
 
-class RewardFunction:
+class RewardFunction(nn.Module):
     """
-    Combined reward function for factuality + confidence.
-    R(x,y) = f * (λ_base + λ_conf * conf)
+    Combined reward function for factuality + confidence + abstention.
+
+    Base Reward:
+        R(x,y) = f * (λ_base + λ_conf * conf)
+
+    With Anti-Hallucination:
+        - Abstention bonus: +abstention_bonus when model says "I don't know" and conf < threshold
+        - Hallucination penalty: -hallucination_penalty when conf < threshold and f < 0
+
+    All weights are LEARNABLE parameters optimized during training.
     """
 
     def __init__(
         self,
         verifier: FactualityVerifier,
         confidence_calc: EntropyConfidenceCalculator,
-        lambda_base: float = 0.5,
-        lambda_conf: float = 0.5
+        lambda_base_init: float = 0.7,  # 70% weight on factuality
+        lambda_conf_init: float = 0.3,  # 30% weight on confidence
+        enable_abstention: bool = False,
+        abstention_bonus_init: float = 0.5,
+        hallucination_penalty_init: float = 1.0,
+        confidence_threshold_init: float = 0.4
     ):
+        super().__init__()
+
         self.verifier = verifier
         self.confidence_calc = confidence_calc
-        self.lambda_base = lambda_base
-        self.lambda_conf = lambda_conf
+
+        # LEARNABLE reward weights (normalized to sum to 1 via softmax)
+        # Store logits that will be softmax-normalized
+        self.lambda_logits = nn.Parameter(torch.tensor([
+            np.log(lambda_base_init),  # logit for factuality weight
+            np.log(lambda_conf_init)   # logit for confidence weight
+        ]))
+
+        # Anti-hallucination parameters (learnable)
+        self.enable_abstention = enable_abstention
+        if self.enable_abstention:
+            # Positive rewards/penalties (use softplus to ensure positive)
+            self.abstention_bonus_raw = nn.Parameter(torch.tensor(abstention_bonus_init))
+            self.hallucination_penalty_raw = nn.Parameter(torch.tensor(hallucination_penalty_init))
+            # Confidence threshold: logit to keep in [0, 1] after sigmoid
+            self.confidence_threshold_logit = nn.Parameter(
+                torch.tensor(np.log(confidence_threshold_init / (1 - confidence_threshold_init + 1e-8)))
+            )
+        else:
+            # Register as non-learnable buffers when disabled
+            self.register_buffer('abstention_bonus_raw', torch.tensor(abstention_bonus_init))
+            self.register_buffer('hallucination_penalty_raw', torch.tensor(hallucination_penalty_init))
+            self.register_buffer('confidence_threshold_logit',
+                torch.tensor(np.log(confidence_threshold_init / (1 - confidence_threshold_init + 1e-8))))
+
+        # Abstention phrases to detect
+        self.abstention_phrases = [
+            "i don't know",
+            "i do not know",
+            "not sure",
+            "uncertain",
+            "cannot answer",
+            "can't answer",
+            "no information",
+            "insufficient information"
+        ]
+
+    @property
+    def lambda_weights(self):
+        """Get normalized weights (sum to 1) via softmax."""
+        return F.softmax(self.lambda_logits, dim=0)
+
+    @property
+    def lambda_base(self):
+        """Factuality weight (normalized)."""
+        return self.lambda_weights[0]
+
+    @property
+    def lambda_conf(self):
+        """Confidence weight (normalized)."""
+        return self.lambda_weights[1]
+
+    @property
+    def abstention_bonus(self):
+        """Ensure abstention_bonus stays positive via softplus."""
+        return F.softplus(self.abstention_bonus_raw)
+
+    @property
+    def hallucination_penalty(self):
+        """Ensure hallucination_penalty stays positive via softplus."""
+        return F.softplus(self.hallucination_penalty_raw)
+
+    @property
+    def confidence_threshold(self):
+        """Ensure threshold stays in [0, 1] via sigmoid."""
+        return torch.sigmoid(self.confidence_threshold_logit)
+
+    def is_abstention(self, answer: str, question: str) -> bool:
+        """
+        Check if answer is an abstention using NLI verifier.
+
+        Uses the verifier to check if the answer entails "I don't know" or similar abstention.
+        More robust than string matching.
+
+        Args:
+            answer: Generated answer text
+            question: Original question (used as context)
+
+        Returns:
+            Boolean indicating if this is an abstention
+        """
+        # Abstention hypothesis templates
+        abstention_templates = [
+            "The answer is unknown",
+            "I don't know the answer",
+            "There is no answer",
+            "I cannot answer this question"
+        ]
+
+        # Check if answer entails any abstention template
+        with torch.no_grad():
+            for template in abstention_templates:
+                # NLI: answer (premise) entails template (hypothesis)?
+                inputs = self.verifier.tokenizer(
+                    [answer],  # premise
+                    [template],  # hypothesis
+                    padding=True,
+                    truncation=True,
+                    max_length=512,
+                    return_tensors="pt"
+                ).to(self.verifier.device)
+
+                outputs = self.verifier.model(**inputs)
+                logits = outputs.logits  # [1, 3]
+                probs = F.softmax(logits, dim=-1)  # [1, 3]
+
+                p_ent = probs[0, self.verifier.label_map["entailment"]].item()
+
+                # High entailment with abstention = it's an abstention
+                if p_ent > 0.5:
+                    return True
+
+        return False
 
     def compute_rewards(
         self,
@@ -173,7 +298,7 @@ class RewardFunction:
         mask: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
         """
-        Compute full reward signal.
+        Compute full reward signal with optional anti-hallucination features.
 
         Args:
             evidences: Evidence texts [B]
@@ -188,23 +313,54 @@ class RewardFunction:
                 - conf: Confidence scores [B]
                 - p_ent: Entailment probabilities [B]
                 - p_cont: Contradiction probabilities [B]
+                - is_abstention: Boolean tensor indicating abstentions [B]
+                - is_hallucination: Boolean tensor indicating likely hallucinations [B]
         """
+        batch_size = len(answers)
+
         # 1. Compute factuality score
         p_ent, p_cont, f = self.verifier.compute_factuality_score(evidences, answers)
 
         # 2. Compute confidence
         conf = self.confidence_calc.compute_confidence(logits, mask)
 
-        # 3. Combine into final reward
-        # R(x,y) = f * (λ_base + λ_conf * conf)
-        rewards = f * (self.lambda_base + self.lambda_conf * conf)
+        # 3. Base reward: R(x,y) = f * (λ_base + λ_conf * conf)
+        base_rewards = f * (self.lambda_base + self.lambda_conf * conf)
+
+        rewards = base_rewards.clone()
+
+        # 4. Apply anti-hallucination modifications if enabled
+        is_abstention = torch.zeros(batch_size, dtype=torch.bool, device=rewards.device)
+        is_hallucination = torch.zeros(batch_size, dtype=torch.bool, device=rewards.device)
+
+        if self.enable_abstention:
+            for i, (answer, question) in enumerate(zip(answers, evidences)):
+                # Check if this is an abstention using NLI verifier
+                abstains = self.is_abstention(answer, question)
+                is_abstention[i] = abstains
+
+                # Low confidence indicator
+                low_conf = conf[i] < self.confidence_threshold
+
+                # Likely hallucination: low confidence + negative factuality
+                likely_halluc = low_conf and f[i] < 0
+                is_hallucination[i] = likely_halluc
+
+                if abstains and low_conf:
+                    # Reward abstention when uncertain
+                    rewards[i] = self.abstention_bonus
+                elif likely_halluc and not abstains:
+                    # Penalize hallucinations (low conf + wrong answer)
+                    rewards[i] = -self.hallucination_penalty
 
         return {
             "rewards": rewards,
             "f": f,
             "conf": conf,
             "p_ent": p_ent,
-            "p_cont": p_cont
+            "p_cont": p_cont,
+            "is_abstention": is_abstention,
+            "is_hallucination": is_hallucination
         }
 
 
