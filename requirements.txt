@@ -3,3 +3,5 @@ datasets
 transformers
 tqdm
 accelerate
+matplotlib
+scikit-learn
