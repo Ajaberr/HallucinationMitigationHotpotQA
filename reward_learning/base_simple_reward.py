@@ -463,14 +463,21 @@ class SimpleRLTrainer:
 
         return response_logprobs
 
-    def train_step(self, prompts: List[str]) -> Tuple[float, float, float, Dict[str, float]]:
+    def train_step(self, batch_data: List[Tuple[str, str]]) -> Tuple[float, float, float, Dict[str, float]]:
         """
         Single REINFORCE training step with verifier-based rewards
+
+        Args:
+            batch_data: List of (prompt, gold_answer) tuples
 
         Returns:
             Tuple of (loss, mean_reward, mean_logprob, extra_metrics)
         """
         self.policy.train()
+
+        # Unpack batch
+        prompts = [p for p, _ in batch_data]
+        gold_answers = [a for _, a in batch_data]
 
         # 1) Encode prompts (questions)
         encoded = self.tokenizer(
@@ -506,8 +513,8 @@ class SimpleRLTrainer:
         # Extract only generated part
         generated_sequences = gen_ids[:, prompt_len:]  # [B, T_gen]
 
-        # Decode answers
-        answers = self.tokenizer.batch_decode(
+        # Decode generated answers
+        generated_answers = self.tokenizer.batch_decode(
             generated_sequences,
             skip_special_tokens=True
         )
@@ -515,11 +522,11 @@ class SimpleRLTrainer:
         # Create mask for generated tokens
         gen_mask = (generated_sequences != self.tokenizer.pad_token_id).float()
 
-        # 3) Compute rewards using verifier + confidence
+        # 3) Compute rewards using verifier + confidence (gold answer vs generated answer)
         with torch.no_grad():
             reward_info = self.reward_model.compute_rewards(
-                evidences=prompts,  # Questions act as evidence
-                answers=answers,
+                evidences=gold_answers,  # Use gold answers as evidence/premise
+                answers=generated_answers,
                 logits=gen_logits,
                 mask=gen_mask
             )
@@ -547,19 +554,18 @@ class SimpleRLTrainer:
 
         return loss.item(), rewards.mean().item(), log_probs.mean().item(), extra_metrics
 
-    def train(self, prompts: List[str]) -> Dict[str, List[float]]:
+    def train(self, training_data: List[Tuple[str, str]]) -> Dict[str, List[float]]:
         """
         Train the policy using REINFORCE with verifier-based rewards
 
         Args:
-            prompts: List of prompts (questions) for training
+            training_data: List of (prompt, gold_answer) tuples for training
 
         Returns:
             Dictionary with training metrics
         """
-        dataset = PromptDataset(prompts)
         dataloader = DataLoader(
-            dataset,
+            training_data,
             batch_size=self.config.batch_size,
             shuffle=True
         )
@@ -579,8 +585,8 @@ class SimpleRLTrainer:
             epoch_factuality = []
             epoch_confidence = []
 
-            for step, batch_prompts in enumerate(dataloader):
-                loss, mean_reward, mean_logprob, extra_metrics = self.train_step(list(batch_prompts))
+            for step, batch in enumerate(dataloader):
+                loss, mean_reward, mean_logprob, extra_metrics = self.train_step(batch)
 
                 epoch_losses.append(loss)
                 epoch_rewards.append(mean_reward)
@@ -851,21 +857,22 @@ def main():
     dataset = load_dataset("hotpot_qa", "fullwiki", split="train")
     dataset = dataset.select(range(100))
 
-    training_prompts = []
+    training_data = []
     for example in dataset:
         question = example['question']
+        gold_answer = example['answer']
         # Format as closed-book QA prompt
         prompt = f"""You are an expert at giving concise answers. Do not give any explanations, only a short answer.
 
 Question: {question}
 Answer: """
-        training_prompts.append(prompt)
+        training_data.append((prompt, gold_answer))
 
-    print(f"Loaded {len(training_prompts)} training questions from HotpotQA")
+    print(f"Loaded {len(training_data)} training question-answer pairs from HotpotQA")
 
     # Train policy with REINFORCE
     print("\nTraining policy with REINFORCE + verifier rewards (100 samples)...")
-    rl_metrics = rl_trainer.train(training_prompts)
+    rl_metrics = rl_trainer.train(training_data)
 
     print(f"\nTraining Results:")
     print(f"Final RL Loss: {rl_metrics['losses'][-1]:.4f}")
