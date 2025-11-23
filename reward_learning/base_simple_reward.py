@@ -198,8 +198,8 @@ class RewardModel:
         self.reward_fn = RewardFunction(
             verifier=self.verifier,
             confidence_calc=None,  # Will be set later
-            lambda_base=lambda_base,
-            lambda_conf=lambda_conf
+            lambda_base_init=lambda_base,
+            lambda_conf_init=lambda_conf
         )
 
         self.device = device
