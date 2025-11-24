@@ -395,8 +395,8 @@ def evaluate_rlhf_base(
         batch_size=1
     )
 
-    dummy_reward = RewardModel("Qwen/Qwen2-7B")
-    rl_trainer = SimpleRLTrainer(rl_config, dummy_reward)
+    # Initialize trainer without reward model (evaluation-only mode)
+    rl_trainer = SimpleRLTrainer(rl_config, reward_model=None)
 
     # Load reward model if provided
     reward_trainer = None
@@ -457,8 +457,8 @@ def evaluate_rlhf_custom(
         batch_size=1
     )
 
-    dummy_reward = CustomRewardModel("Qwen/Qwen2-7B")
-    rl_trainer = CustomSimpleRLTrainer(rl_config, dummy_reward)
+    # Initialize trainer without reward model (evaluation-only mode)
+    rl_trainer = CustomSimpleRLTrainer(rl_config, reward_model=None)
 
     # Load reward model if provided
     reward_trainer = None

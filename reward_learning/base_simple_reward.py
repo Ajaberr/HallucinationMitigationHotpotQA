@@ -395,7 +395,7 @@ class SimpleRLTrainer:
     to update the policy.
     """
 
-    def __init__(self, config: SimpleRLConfig, reward_model: RewardModel):
+    def __init__(self, config: SimpleRLConfig, reward_model: RewardModel = None):
         self.config = config
         self.device = torch.device(config.device)
 
@@ -457,21 +457,22 @@ class SimpleRLTrainer:
             # Print trainable parameters
             self.policy.print_trainable_parameters()
 
-        # Verifier-based reward model
-        self.reward_model = reward_model.to(self.device)
-        self.reward_model.eval()
+        # Verifier-based reward model (optional for evaluation-only mode)
+        self.reward_model = None
+        if reward_model is not None:
+            self.reward_model = reward_model.to(self.device)
+            self.reward_model.eval()
+            # Set vocab size for entropy calculation
+            self.reward_model.set_vocab_size(self.tokenizer.vocab_size)
 
-        # Set vocab size for entropy calculation
-        self.reward_model.set_vocab_size(self.tokenizer.vocab_size)
+        # REINFORCE loss function (only needed for training)
+        self.loss_fn = REINFORCELoss(baseline_type="batch_mean") if reward_model is not None else None
 
-        # REINFORCE loss function
-        self.loss_fn = REINFORCELoss(baseline_type="batch_mean")
-
-        # Optimizer for policy
+        # Optimizer for policy (only needed for training)
         self.optimizer = torch.optim.AdamW(
             self.policy.parameters(),
             lr=config.learning_rate
-        )
+        ) if reward_model is not None else None
 
     def compute_logprobs(
         self,
