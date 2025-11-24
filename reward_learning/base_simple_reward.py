@@ -27,7 +27,7 @@ Reference: This uses reward learning (not DPO) with verifier-based factuality si
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 from transformers import AutoTokenizer, AutoModel, AutoModelForCausalLM
 from typing import List, Dict, Tuple, Optional
 import numpy as np
@@ -572,12 +572,6 @@ class SimpleRLTrainer:
         Returns:
             Dictionary with training metrics
         """
-        dataloader = DataLoader(
-            training_data,
-            batch_size=self.config.batch_size,
-            shuffle=True
-        )
-
         losses = []
         rewards = []
         factuality_scores = []
@@ -593,7 +587,16 @@ class SimpleRLTrainer:
             epoch_factuality = []
             epoch_confidence = []
 
-            for step, batch in enumerate(dataloader):
+            # Manual batching instead of DataLoader (which doesn't handle string tuples well)
+            import random
+            indices = list(range(len(training_data)))
+            random.shuffle(indices)
+
+            for step in range(0, len(training_data), self.config.batch_size):
+                # Get batch indices
+                batch_indices = indices[step:step + self.config.batch_size]
+                batch = [training_data[i] for i in batch_indices]
+
                 loss, mean_reward, mean_logprob, extra_metrics = self.train_step(batch)
 
                 epoch_losses.append(loss)
