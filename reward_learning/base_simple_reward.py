@@ -410,6 +410,9 @@ class SimpleRLTrainer:
             low_cpu_mem_usage=True
         )
 
+        # Enable gradient checkpointing to reduce memory usage without quality loss
+        self.policy.gradient_checkpointing_enable()
+
         # Verifier-based reward model
         self.reward_model = reward_model.to(self.device)
         self.reward_model.eval()
@@ -533,6 +536,9 @@ class SimpleRLTrainer:
                 mask=gen_mask
             )
             rewards = reward_info["rewards"]  # [B]
+
+        # Clear CUDA cache to free memory before gradient-requiring forward pass
+        torch.cuda.empty_cache()
 
         # 4) Compute log π_θ(ŷ | x) for sampled responses
         # Need to re-run forward pass for gradients
@@ -850,9 +856,9 @@ def main():
     rl_config = SimpleRLConfig(
         policy_model_name=policy_model,
         learning_rate=1e-5,
-        batch_size=2,
+        batch_size=1,  # Reduced to prevent OOM
         num_epochs=1,
-        max_new_tokens=50
+        max_new_tokens=32  # Reduced from 50 to save memory
     )
 
     # Initialize RL trainer
