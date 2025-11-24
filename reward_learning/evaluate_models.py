@@ -167,7 +167,7 @@ def compute_metrics(gold_answers, pred_answers):
 # Dataset Loading (shared)
 # ============================================================================
 
-def load_hotpotqa_data(split: str = "validation", num_samples: int = 100) -> Tuple[List[str], List[List[str]]]:
+def load_hotpotqa_data(split: str = "validation", num_samples: int = 1000) -> Tuple[List[str], List[List[str]]]:
     """
     Load HotpotQA dataset and extract questions and answers.
 
@@ -249,7 +249,7 @@ def evaluate_baseline(
     model_id: str,
     questions: List[str] = None,
     gold_answers: List[List[str]] = None,
-    num_samples: int = 100,
+    num_samples: int = 1000,
     split: str = "validation",
     verbose: bool = True
 ) -> Dict:
@@ -359,7 +359,7 @@ def evaluate_rlhf_base(
     reward_path: str = None,
     questions: List[str] = None,
     gold_answers: List[List[str]] = None,
-    num_samples: int = 100
+    num_samples: int = 1000
 ) -> Dict:
     """
     Evaluate the base RLHF model on HotpotQA.
@@ -421,7 +421,7 @@ def evaluate_rlhf_custom(
     reward_path: str = None,
     questions: List[str] = None,
     gold_answers: List[List[str]] = None,
-    num_samples: int = 100
+    num_samples: int = 1000
 ) -> Dict:
     """
     Evaluate the custom anti-hallucination RLHF model on HotpotQA.
@@ -488,7 +488,7 @@ def compare_rlhf_models(
     custom_policy_path: str,
     base_reward_path: str = None,
     custom_reward_path: str = None,
-    num_samples: int = 100
+    num_samples: int = 1000
 ) -> Dict:
     """
     Compare base and custom RLHF models side-by-side on HotpotQA.
@@ -564,7 +564,7 @@ def compare_baseline_vs_rlhf(
     policy_path: str,
     reward_path: str = None,
     model_type: str = "base",
-    num_samples: int = 100
+    num_samples: int = 1000
 ) -> Dict:
     """
     Compare baseline vanilla model vs RLHF-trained model.
@@ -704,7 +704,7 @@ def main():
     parser.add_argument(
         '--num_samples',
         type=int,
-        default=100,
+        default=1000,
         help='Number of samples to evaluate'
     )
     parser.add_argument(

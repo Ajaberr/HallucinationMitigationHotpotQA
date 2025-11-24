@@ -366,17 +366,31 @@ class RewardFunction(nn.Module):
 
 class REINFORCELoss:
     """
-    REINFORCE (policy gradient) loss with baseline.
+    REINFORCE (policy gradient) loss with baseline and optional KL divergence penalty.
+
+    Loss = -E[(R - b) * log π_θ(y|x)] + β * KL(π_θ || π_ref)
+
+    where:
+    - R is the reward
+    - b is the baseline (mean reward)
+    - π_θ is the current policy
+    - π_ref is the reference policy (frozen)
+    - β is the KL penalty coefficient
     """
 
-    def __init__(self, baseline_type: str = "batch_mean"):
+    def __init__(self, baseline_type: str = "batch_mean", kl_penalty: float = 0.0):
         """
         Args:
             baseline_type: Type of baseline to use
                 - "batch_mean": Use mean reward in batch
                 - "none": No baseline (higher variance)
+            kl_penalty: KL divergence penalty coefficient (β)
+                - 0.0: No KL penalty (standard REINFORCE)
+                - 0.01-0.1: Light penalty (recommended for RLHF)
+                - >0.1: Strong penalty (limits policy drift)
         """
         self.baseline_type = baseline_type
+        self.kl_penalty = kl_penalty
 
     def compute_log_probs(
         self,
@@ -419,14 +433,16 @@ class REINFORCELoss:
     def compute_loss(
         self,
         rewards: torch.Tensor,
-        log_probs: torch.Tensor
+        log_probs: torch.Tensor,
+        ref_log_probs: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
-        Compute REINFORCE loss with baseline.
+        Compute REINFORCE loss with baseline and optional KL divergence penalty.
 
         Args:
             rewards: Reward values [B]
-            log_probs: Log probabilities of sampled sequences [B]
+            log_probs: Log probabilities of sampled sequences from current policy [B]
+            ref_log_probs: Log probabilities from reference policy [B] (optional)
 
         Returns:
             loss: Scalar loss value
@@ -444,11 +460,24 @@ class REINFORCELoss:
         advantages = rewards - baseline
 
         # REINFORCE loss: -E[(R - b) * log π(y|x)]
-        loss = -(advantages * log_probs).mean()
+        pg_loss = -(advantages * log_probs).mean()
+
+        # KL divergence penalty (if enabled and reference provided)
+        kl_loss = torch.tensor(0.0, device=log_probs.device)
+        if self.kl_penalty > 0.0 and ref_log_probs is not None:
+            # KL(π_θ || π_ref) ≈ log π_θ(y|x) - log π_ref(y|x)
+            kl_div = (log_probs - ref_log_probs)
+            kl_loss = self.kl_penalty * kl_div.mean()
+
+        # Total loss
+        loss = pg_loss + kl_loss
 
         # Metrics for monitoring
         metrics = {
             "loss": loss.item(),
+            "pg_loss": pg_loss.item(),
+            "kl_loss": kl_loss.item() if isinstance(kl_loss, torch.Tensor) else kl_loss,
+            "mean_kl_div": kl_div.mean().item() if self.kl_penalty > 0.0 and ref_log_probs is not None else 0.0,
             "mean_reward": rewards.mean().item(),
             "std_reward": rewards.std().item(),
             "mean_advantage": advantages.mean().item(),

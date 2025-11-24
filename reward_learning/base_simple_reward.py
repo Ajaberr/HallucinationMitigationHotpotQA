@@ -369,6 +369,7 @@ class SimpleRLConfig:
     max_new_tokens: int = 64
     temperature: float = 1.0
     top_p: float = 0.9
+    kl_penalty: float = 0.02  # KL divergence penalty coefficient (0.0 = no penalty, 0.01-0.1 = recommended)
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -404,52 +405,49 @@ class SimpleRLTrainer:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Load model with 4-bit quantization + LoRA for efficient training
+        # Load model with 4-bit quantization + LoRA (matching qwen-finetune.py approach)
         from transformers import BitsAndBytesConfig
-        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, AutoPeftModelForCausalLM
+        from peft import LoraConfig, get_peft_model, AutoPeftModelForCausalLM
         import os
 
         # Check if this is a saved LoRA checkpoint (has adapter_config.json)
         is_lora_checkpoint = os.path.exists(os.path.join(config.policy_model_name, "adapter_config.json"))
 
+        # Quantization config (matching qwen-finetune.py)
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4"
         )
 
         if is_lora_checkpoint:
-            # Load saved LoRA adapters from checkpoint with 4-bit quantization
+            # Load saved LoRA adapters from checkpoint
             print(f"Loading LoRA checkpoint from {config.policy_model_name}...")
             self.policy = AutoPeftModelForCausalLM.from_pretrained(
                 config.policy_model_name,
                 device_map="auto",
-                low_cpu_mem_usage=True,
                 quantization_config=bnb_config
             )
             print("LoRA checkpoint loaded successfully!")
         else:
-            # Load base model and add new LoRA adapters for training
-            print(f"Loading base model {config.policy_model_name} with new LoRA adapters...")
+            # Load base model and add new LoRA adapters (matching qwen-finetune.py)
+            print(f"Loading base model {config.policy_model_name} with LoRA adapters...")
             self.policy = AutoModelForCausalLM.from_pretrained(
                 config.policy_model_name,
                 quantization_config=bnb_config,
                 device_map="auto",
-                low_cpu_mem_usage=True
+                trust_remote_code=True,
+                attn_implementation="sdpa" if torch.cuda.is_available() else "eager"
             )
 
-            # Prepare model for k-bit training (enables gradient checkpointing, etc.)
-            self.policy = prepare_model_for_kbit_training(self.policy)
-
-            # Configure LoRA: only train small adapter layers instead of full model
+            # Prepare LoRA configuration (matching qwen-finetune.py)
             lora_config = LoraConfig(
-                r=16,  # LoRA rank
-                lora_alpha=32,  # LoRA scaling factor
-                target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+                r=16,
+                lora_alpha=32,
                 lora_dropout=0.05,
                 bias="none",
-                task_type="CAUSAL_LM"
+                task_type="CAUSAL_LM",
+                target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
             )
 
             # Add LoRA adapters to the quantized model
@@ -466,8 +464,36 @@ class SimpleRLTrainer:
             # Set vocab size for entropy calculation
             self.reward_model.set_vocab_size(self.tokenizer.vocab_size)
 
+        # Store reference policy for KL divergence (frozen copy of initial policy)
+        # Only create if training (reward_model is not None) and KL penalty > 0
+        self.ref_policy = None
+        if reward_model is not None and config.kl_penalty > 0.0:
+            print(f"Creating reference policy for KL divergence penalty (β={config.kl_penalty})...")
+            # For LoRA models: reference is the base model (before adapter training)
+            # We keep the initial state by cloning the model at initialization
+            if is_lora_checkpoint:
+                # If loading from checkpoint, reference should be the base model
+                print("WARNING: Loading from LoRA checkpoint - reference policy will also include checkpoint adapters")
+                print("For true KL penalty against base model, train from scratch (not from checkpoint)")
+
+            from copy import deepcopy
+            self.ref_policy = deepcopy(self.policy)
+
+            # Freeze all parameters
+            for param in self.ref_policy.parameters():
+                param.requires_grad = False
+            self.ref_policy.eval()
+            print(f"Reference policy created and frozen (memory: ~{torch.cuda.max_memory_allocated() / 1e9:.2f}GB)")
+
+            # Warning about memory usage
+            if torch.cuda.is_available():
+                print(f"NOTE: Reference policy uses extra GPU memory. Consider lower kl_penalty if OOM occurs.")
+
         # REINFORCE loss function (only needed for training)
-        self.loss_fn = REINFORCELoss(baseline_type="batch_mean") if reward_model is not None else None
+        self.loss_fn = REINFORCELoss(
+            baseline_type="batch_mean",
+            kl_penalty=config.kl_penalty
+        ) if reward_model is not None else None
 
         # Optimizer for policy (only needed for training)
         self.optimizer = torch.optim.AdamW(
@@ -514,19 +540,20 @@ class SimpleRLTrainer:
 
         return response_logprobs
 
-    def train_step(self, batch_data: List[Tuple[str, str]]) -> Tuple[float, float, float, Dict[str, float]]:
+    def train_step(self, batch_data: List[Tuple[str, str, str]]) -> Tuple[float, float, float, Dict[str, float]]:
         """
         Single REINFORCE training step with verifier-based rewards
 
         Args:
-            batch_data: List of (prompt, gold_answer) tuples
+            batch_data: List of (prompt, gold_answer, evidence) tuples
 
         Returns:
             Tuple of (loss, mean_reward, mean_logprob, extra_metrics)
         """
         # Unpack batch
-        prompts = [p for p, _ in batch_data]
-        gold_answers = [a for _, a in batch_data]
+        prompts = [p for p, _, _ in batch_data]
+        gold_answers = [a for _, a, _ in batch_data]
+        evidences = [e for _, _, e in batch_data]
 
         # 1) Encode prompts (questions)
         encoded = self.tokenizer(
@@ -573,10 +600,10 @@ class SimpleRLTrainer:
         # Create mask for generated tokens
         gen_mask = (generated_sequences != self.tokenizer.pad_token_id).float()
 
-        # 3) Compute rewards using verifier + confidence (gold answer vs generated answer)
+        # 3) Compute rewards using verifier + confidence (HotpotQA context vs generated answer)
         with torch.no_grad():
             reward_info = self.reward_model.compute_rewards(
-                evidences=gold_answers,  # Use gold answers as evidence/premise
+                evidences=evidences,  # Use HotpotQA context as evidence/premise
                 answers=generated_answers,
                 logits=gen_logits,
                 mask=gen_mask
@@ -592,8 +619,28 @@ class SimpleRLTrainer:
         gen_attention = (gen_ids != self.tokenizer.pad_token_id).long()
         log_probs = self.compute_logprobs(gen_ids, gen_attention, prompt_len)  # [B]
 
-        # 5) REINFORCE loss with baseline
-        loss, loss_metrics = self.loss_fn.compute_loss(rewards, log_probs)
+        # 4b) Compute reference log probs for KL divergence penalty (if enabled)
+        ref_log_probs = None
+        if self.ref_policy is not None:
+            with torch.no_grad():
+                # Compute log probs using frozen reference policy
+                ref_outputs = self.ref_policy(input_ids=gen_ids, attention_mask=gen_attention)
+                ref_logits = ref_outputs.logits[:, :-1, :]  # [B, T-1, V]
+                ref_log_probs_all = torch.log_softmax(ref_logits, dim=-1)  # [B, T-1, V]
+
+                # Get log probs for actual tokens
+                next_ids = gen_ids[:, 1:]  # [B, T-1]
+                ref_token_logprobs = ref_log_probs_all.gather(-1, next_ids.unsqueeze(-1)).squeeze(-1)  # [B, T-1]
+
+                # Mask to only keep response tokens
+                mask = torch.zeros_like(ref_token_logprobs)
+                mask[:, prompt_len-1:] = 1.0
+
+                # Sum log probs over response tokens
+                ref_log_probs = (ref_token_logprobs * mask).sum(dim=1)  # [B]
+
+        # 5) REINFORCE loss with baseline and KL penalty
+        loss, loss_metrics = self.loss_fn.compute_loss(rewards, log_probs, ref_log_probs)
 
         # Backward pass
         self.optimizer.zero_grad()
@@ -609,12 +656,12 @@ class SimpleRLTrainer:
 
         return loss.item(), rewards.mean().item(), log_probs.mean().item(), extra_metrics
 
-    def train(self, training_data: List[Tuple[str, str]]) -> Dict[str, List[float]]:
+    def train(self, training_data: List[Tuple[str, str, str]]) -> Dict[str, List[float]]:
         """
         Train the policy using REINFORCE with verifier-based rewards
 
         Args:
-            training_data: List of (prompt, gold_answer) tuples for training
+            training_data: List of (prompt, gold_answer, evidence) tuples for training
 
         Returns:
             Dictionary with training metrics
@@ -656,6 +703,10 @@ class SimpleRLTrainer:
                     print(f"  Loss: {loss:.4f}, Reward: {mean_reward:.4f}")
                     print(f"  Factuality: {extra_metrics['mean_factuality']:.4f}, "
                           f"Confidence: {extra_metrics['mean_confidence']:.4f}")
+                    # Print KL divergence metrics if KL penalty is enabled
+                    if self.config.kl_penalty > 0.0:
+                        print(f"  KL Loss: {extra_metrics.get('kl_loss', 0.0):.4f}, "
+                              f"KL Div: {extra_metrics.get('mean_kl_div', 0.0):.4f}")
 
             avg_loss = np.mean(epoch_losses)
             avg_reward = np.mean(epoch_rewards)
@@ -719,10 +770,84 @@ class SimpleRLTrainer:
         return response
 
     def save_policy(self, path: str):
-        """Save the trained policy model"""
+        """
+        Save the trained policy model (LoRA adapters only).
+
+        This saves only the LoRA adapter weights (~80MB), not the full model.
+        To merge and save the full model, use merge_and_save_full_model().
+        """
+        print(f"Saving LoRA adapters to {path}...")
         self.policy.save_pretrained(path)
         self.tokenizer.save_pretrained(path)
-        print(f"Policy saved to {path}")
+        print(f"LoRA adapters saved to {path}")
+
+    def merge_and_save_full_model(
+        self,
+        adapter_path: str,
+        output_path: str,
+        push_to_hub: bool = False,
+        repo_id: str = None
+    ):
+        """
+        Merge LoRA adapters with base model and save/push the full model.
+
+        This follows the approach from save_model.py:
+        1. Reload base model in FP16
+        2. Load LoRA adapters
+        3. Merge adapters into base model
+        4. Optionally push to HuggingFace Hub
+
+        Args:
+            adapter_path: Path to saved LoRA adapters
+            output_path: Path to save the merged full model
+            push_to_hub: Whether to push to HuggingFace Hub
+            repo_id: HuggingFace repo ID (required if push_to_hub=True)
+        """
+        from peft import PeftModel
+
+        print("\n" + "="*70)
+        print("Merging LoRA adapters with base model...")
+        print("="*70)
+
+        # Clear GPU memory
+        torch.cuda.empty_cache()
+
+        # 1. Reload base model in FP16 (cannot merge 4bit directly)
+        print(f"Loading base model {self.config.policy_model_name} in FP16...")
+        base_model = AutoModelForCausalLM.from_pretrained(
+            self.config.policy_model_name,
+            return_dict=True,
+            torch_dtype=torch.float16,
+            device_map="auto",
+            trust_remote_code=True
+        )
+
+        # 2. Load the adapter using the base_model object
+        print(f"Loading LoRA adapters from {adapter_path}...")
+        model = PeftModel.from_pretrained(base_model, adapter_path)
+
+        # 3. Merge
+        print("Merging adapters into base model...")
+        model = model.merge_and_unload()
+
+        # 4. Save locally
+        print(f"Saving merged model to {output_path}...")
+        model.save_pretrained(output_path, safe_serialization=True)
+        self.tokenizer.save_pretrained(output_path)
+        print(f"Merged model saved to {output_path}")
+
+        # 5. Push to hub if requested
+        if push_to_hub:
+            if repo_id is None:
+                raise ValueError("repo_id must be provided when push_to_hub=True")
+            print(f"Pushing to HuggingFace Hub: {repo_id}...")
+            model.push_to_hub(repo_id, safe_serialization=True)
+            self.tokenizer.push_to_hub(repo_id)
+            print(f"Model pushed to {repo_id}")
+
+        print("="*70)
+        print("Merge complete!")
+        print("="*70)
 
     def evaluate_on_hotpotqa(
         self,
@@ -908,37 +1033,55 @@ def main():
         learning_rate=1e-5,
         batch_size=1,  # Reduced to prevent OOM
         num_epochs=1,
-        max_new_tokens=20  # Reduced from 32 to save more memory
+        max_new_tokens=20,  # Reduced from 32 to save more memory
+        kl_penalty=0.02  # KL divergence penalty to prevent policy drift
     )
 
     # Initialize RL trainer
     print(f"\nInitializing REINFORCE trainer...")
     print(f"Device: {rl_config.device}")
     print(f"Policy Model: {rl_config.policy_model_name}")
+    print(f"KL Penalty: {rl_config.kl_penalty} (prevents policy drift from reference)")
     rl_trainer = SimpleRLTrainer(rl_config, reward_model)
 
-    # Load HotpotQA training data (100 samples)
-    print("\nLoading HotpotQA training data (100 samples)...")
+    # Load HotpotQA training data (10,000 samples from positions 10001-20000)
+    print("\nLoading HotpotQA training data (10,000 samples from positions 10001-20000)...")
     from datasets import load_dataset
 
     dataset = load_dataset("hotpot_qa", "fullwiki", split="train")
-    dataset = dataset.select(range(100))
+    dataset = dataset.select(range(10000, 20000))
 
     training_data = []
     for example in dataset:
         question = example['question']
         gold_answer = example['answer']
-        # Format as closed-book QA prompt
+
+        # Extract context (supporting documents) for verification
+        # HotpotQA context format: {'title': [...], 'sentences': [[...], [...]]}
+        context_titles = example['context']['title']
+        context_sentences = example['context']['sentences']
+
+        # Format context as evidence text
+        evidence_parts = []
+        for title, sentences in zip(context_titles, context_sentences):
+            evidence_parts.append(f"{title}: {' '.join(sentences)}")
+        evidence = "\n".join(evidence_parts)
+
+        # Format as closed-book QA prompt (still closed-book for the policy)
         prompt = f"""You are an expert at giving concise answers. Do not give any explanations, only a short answer.
 
 Question: {question}
 Answer: """
-        training_data.append((prompt, gold_answer))
+        training_data.append((prompt, gold_answer, evidence))
 
-    print(f"Loaded {len(training_data)} training question-answer pairs from HotpotQA")
+    print(f"Loaded {len(training_data)} training samples from HotpotQA (with context for verification)")
 
     # Train policy with REINFORCE
-    print("\nTraining policy with REINFORCE + verifier rewards (100 samples)...")
+    print(f"\nTraining policy with REINFORCE + verifier rewards ({len(training_data)} samples)...")
+    print(f"Training setup:")
+    print(f"  - Policy: Closed-book QA (no context in prompt)")
+    print(f"  - Verifier: Uses HotpotQA context to verify factuality of generated answers")
+    print(f"  - KL Penalty: β={rl_config.kl_penalty} (prevents catastrophic forgetting)")
     rl_metrics = rl_trainer.train(training_data)
 
     print(f"\nTraining Results:")
@@ -967,21 +1110,30 @@ Answer: """
         reward = rm_trainer.score_text(question, response)
         print(f"Reward: {reward:.4f}")
 
-    # Save trained policy
+    # Save trained policy (LoRA adapters only)
     print("\n" + "="*70)
     print("Saving trained policy...")
     rl_trainer.save_policy("verifier_rlhf_policy")
+
+    print("\nMerging LoRA adapters with base model...")
+    rl_trainer.merge_and_save_full_model(
+         adapter_path="verifier_rlhf_policy",
+         output_path="verifier_rlhf_full_model",
+         push_to_hub=True,
+         repo_id="jxrma/Qwen2.5-7B-RLHF-HotpotQA"  # Change to your desired repo name
+ )
 
     print("\n" + "="*70)
     print("Verifier-Based RLHF Training Complete!")
     print("="*70)
     print("\nSummary:")
     print(f"- Reward: Factuality (NLI verifier) + Confidence (entropy)")
+    print(f"- Loss: REINFORCE + KL Divergence Penalty (β={rl_config.kl_penalty})")
     print(f"- Final Avg Reward: {rl_metrics['rewards'][-1]:.4f}")
     print(f"- Final Avg Factuality: {rl_metrics['factuality'][-1]:.4f}")
     print(f"- Final Avg Confidence: {rl_metrics['confidence'][-1]:.4f}")
     print(f"- Reward config saved to: verifier_reward_config.pt")
-    print(f"- Policy saved to: verifier_rlhf_policy/")
+    print(f"- LoRA adapters saved to: verifier_rlhf_policy/")
     print("="*70)
 
 
