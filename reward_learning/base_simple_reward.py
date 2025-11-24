@@ -577,7 +577,8 @@ class SimpleRLTrainer:
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 max_new_tokens=self.config.max_new_tokens,
-                do_sample=False,  # Greedy decoding for stability
+                do_sample=True,              # ← Changed from False
+                temperature=0.7,             # ← Add this
                 pad_token_id=self.tokenizer.pad_token_id,
                 return_dict_in_generate=True,
                 output_scores=True
@@ -1030,11 +1031,11 @@ def main():
 
     rl_config = SimpleRLConfig(
         policy_model_name=policy_model,
-        learning_rate=1e-5,
-        batch_size=1,  # Reduced to prevent OOM
+        learning_rate=5e-7,        # ← Reduced from 1e-5
+        batch_size=4,              # ← Increased from 1
         num_epochs=1,
-        max_new_tokens=20,  # Reduced from 32 to save more memory
-        kl_penalty=0.02  # KL divergence penalty to prevent policy drift
+        max_new_tokens=20,
+        kl_penalty=0.1             # ← Increased from 0.02
     )
 
     # Initialize RL trainer
