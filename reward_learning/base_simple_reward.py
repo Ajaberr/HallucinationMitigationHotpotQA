@@ -506,8 +506,6 @@ class SimpleRLTrainer:
         Returns:
             Tuple of (loss, mean_reward, mean_logprob, extra_metrics)
         """
-        self.policy.train()
-
         # Unpack batch
         prompts = [p for p, _ in batch_data]
         gold_answers = [a for _, a in batch_data]
@@ -525,6 +523,8 @@ class SimpleRLTrainer:
         prompt_len = input_ids.size(1)
 
         # 2) Sample responses from policy π_θ(y|x) with scores
+        # IMPORTANT: Set to eval mode for generation to avoid NaN with LoRA + quantization
+        self.policy.eval()
         with torch.no_grad():
             gen_outputs = self.policy.generate(
                 input_ids=input_ids,
@@ -569,7 +569,8 @@ class SimpleRLTrainer:
         torch.cuda.empty_cache()
 
         # 4) Compute log π_θ(ŷ | x) for sampled responses
-        # Need to re-run forward pass for gradients
+        # Need to re-run forward pass for gradients - set back to train mode
+        self.policy.train()
         gen_attention = (gen_ids != self.tokenizer.pad_token_id).long()
         log_probs = self.compute_logprobs(gen_ids, gen_attention, prompt_len)  # [B]
 
