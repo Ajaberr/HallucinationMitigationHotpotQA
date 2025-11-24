@@ -406,7 +406,11 @@ class SimpleRLTrainer:
 
         # Load model with 4-bit quantization + LoRA for efficient training
         from transformers import BitsAndBytesConfig
-        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, AutoPeftModelForCausalLM
+        import os
+
+        # Check if this is a saved LoRA checkpoint (has adapter_config.json)
+        is_lora_checkpoint = os.path.exists(os.path.join(config.policy_model_name, "adapter_config.json"))
 
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
@@ -415,31 +419,43 @@ class SimpleRLTrainer:
             bnb_4bit_quant_type="nf4"
         )
 
-        self.policy = AutoModelForCausalLM.from_pretrained(
-            config.policy_model_name,
-            quantization_config=bnb_config,
-            device_map="auto",
-            low_cpu_mem_usage=True
-        )
+        if is_lora_checkpoint:
+            # Load saved LoRA adapters from checkpoint
+            print(f"Loading LoRA checkpoint from {config.policy_model_name}...")
+            self.policy = AutoPeftModelForCausalLM.from_pretrained(
+                config.policy_model_name,
+                device_map="auto",
+                low_cpu_mem_usage=True
+            )
+            print("LoRA checkpoint loaded successfully!")
+        else:
+            # Load base model and add new LoRA adapters for training
+            print(f"Loading base model {config.policy_model_name} with new LoRA adapters...")
+            self.policy = AutoModelForCausalLM.from_pretrained(
+                config.policy_model_name,
+                quantization_config=bnb_config,
+                device_map="auto",
+                low_cpu_mem_usage=True
+            )
 
-        # Prepare model for k-bit training (enables gradient checkpointing, etc.)
-        self.policy = prepare_model_for_kbit_training(self.policy)
+            # Prepare model for k-bit training (enables gradient checkpointing, etc.)
+            self.policy = prepare_model_for_kbit_training(self.policy)
 
-        # Configure LoRA: only train small adapter layers instead of full model
-        lora_config = LoraConfig(
-            r=16,  # LoRA rank
-            lora_alpha=32,  # LoRA scaling factor
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-            lora_dropout=0.05,
-            bias="none",
-            task_type="CAUSAL_LM"
-        )
+            # Configure LoRA: only train small adapter layers instead of full model
+            lora_config = LoraConfig(
+                r=16,  # LoRA rank
+                lora_alpha=32,  # LoRA scaling factor
+                target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+                lora_dropout=0.05,
+                bias="none",
+                task_type="CAUSAL_LM"
+            )
 
-        # Add LoRA adapters to the quantized model
-        self.policy = get_peft_model(self.policy, lora_config)
+            # Add LoRA adapters to the quantized model
+            self.policy = get_peft_model(self.policy, lora_config)
 
-        # Print trainable parameters
-        self.policy.print_trainable_parameters()
+            # Print trainable parameters
+            self.policy.print_trainable_parameters()
 
         # Verifier-based reward model
         self.reward_model = reward_model.to(self.device)
