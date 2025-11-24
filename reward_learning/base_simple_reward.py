@@ -404,8 +404,9 @@ class SimpleRLTrainer:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Load model with 4-bit quantization
+        # Load model with 4-bit quantization + LoRA for efficient training
         from transformers import BitsAndBytesConfig
+        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
@@ -421,8 +422,24 @@ class SimpleRLTrainer:
             low_cpu_mem_usage=True
         )
 
-        # Enable gradient checkpointing to reduce memory usage without quality loss
-        self.policy.gradient_checkpointing_enable()
+        # Prepare model for k-bit training (enables gradient checkpointing, etc.)
+        self.policy = prepare_model_for_kbit_training(self.policy)
+
+        # Configure LoRA: only train small adapter layers instead of full model
+        lora_config = LoraConfig(
+            r=16,  # LoRA rank
+            lora_alpha=32,  # LoRA scaling factor
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+            lora_dropout=0.05,
+            bias="none",
+            task_type="CAUSAL_LM"
+        )
+
+        # Add LoRA adapters to the quantized model
+        self.policy = get_peft_model(self.policy, lora_config)
+
+        # Print trainable parameters
+        self.policy.print_trainable_parameters()
 
         # Verifier-based reward model
         self.reward_model = reward_model.to(self.device)
