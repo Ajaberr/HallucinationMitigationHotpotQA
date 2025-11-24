@@ -861,7 +861,7 @@ def main():
         learning_rate=1e-5,
         batch_size=1,  # Reduced to prevent OOM
         num_epochs=1,
-        max_new_tokens=32  # Reduced from 50 to save memory
+        max_new_tokens=20  # Reduced from 32 to save more memory
     )
 
     # Initialize RL trainer
