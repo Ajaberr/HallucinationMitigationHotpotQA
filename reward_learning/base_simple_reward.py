@@ -404,8 +404,19 @@ class SimpleRLTrainer:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
+        # Load model with 4-bit quantization
+        from transformers import BitsAndBytesConfig
+
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4"
+        )
+
         self.policy = AutoModelForCausalLM.from_pretrained(
             config.policy_model_name,
+            quantization_config=bnb_config,
             device_map="auto",
             low_cpu_mem_usage=True
         )
