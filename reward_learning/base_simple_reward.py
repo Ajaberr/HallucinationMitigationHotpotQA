@@ -405,8 +405,10 @@ class SimpleRLTrainer:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         self.policy = AutoModelForCausalLM.from_pretrained(
-            config.policy_model_name
-        ).to(self.device)
+            config.policy_model_name,
+            device_map="auto",
+            low_cpu_mem_usage=True
+        )
 
         # Verifier-based reward model
         self.reward_model = reward_model.to(self.device)
