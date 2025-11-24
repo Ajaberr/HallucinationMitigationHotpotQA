@@ -836,8 +836,17 @@ def main():
     reward_model.eval()
 
     # Configuration for RL training
+    # OPTION 1: Use base Qwen2-7B model
+    # OPTION 2: Use fine-tuned HotpotQA model (recommended for better baseline)
+    USE_FINETUNED_MODEL = True  # Set to False to use base model
+
+    if USE_FINETUNED_MODEL:
+        policy_model = "fsiddiqui2/Qwen2.5-7B-Instruct-HotpotQA-Finetuned-10000"
+    else:
+        policy_model = "Qwen/Qwen2-7B"
+
     rl_config = SimpleRLConfig(
-        policy_model_name="Qwen/Qwen2-7B",
+        policy_model_name=policy_model,
         learning_rate=1e-5,
         batch_size=2,
         num_epochs=1,
