@@ -526,13 +526,13 @@ class SimpleRLTrainer:
         # IMPORTANT: Set to eval mode for generation to avoid NaN with LoRA + quantization
         self.policy.eval()
         with torch.no_grad():
+            # Use greedy decoding instead of sampling to avoid numerical instability
+            # with LoRA + 4-bit quantization
             gen_outputs = self.policy.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 max_new_tokens=self.config.max_new_tokens,
-                do_sample=True,
-                top_p=self.config.top_p,
-                temperature=self.config.temperature,
+                do_sample=False,  # Greedy decoding for stability
                 pad_token_id=self.tokenizer.pad_token_id,
                 return_dict_in_generate=True,
                 output_scores=True
