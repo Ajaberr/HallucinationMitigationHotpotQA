@@ -10,6 +10,7 @@ from transformers import (
 )
 from peft import LoraConfig, get_peft_model, AutoPeftModelForCausalLM
 import huggingface_hub
+from transformers.trainer_utils import get_last_checkpoint
 
 # --- Configuration ---
 # 1. Login to Hugging Face (Required to push the model)
@@ -17,12 +18,13 @@ import huggingface_hub
 # huggingface_hub.login(token="YOUR_HF_TOKEN_HERE") 
 
 MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
-NEW_MODEL_NAME = "Qwen2.5-7B-Instruct-HotpotQA-Finetuned"
+NEW_MODEL_NAME = "Qwen2.5-7B-Instruct-HotpotQA-Finetuned-10000"
 HF_USERNAME = "fsiddiqui2" 
 DATASET_NAME = "hotpot_qa"
 SUBSET_NAME = "fullwiki"
 SPLIT = "train"
-NUM_SAMPLES = 1000
+NUM_SAMPLES = 10000
+OUTPUT_DIR="./qwen_hotpot_finetuned"
 
 # Using the prompt format from your EVAL code
 PROMPT_PREFIX = """You are an expert at giving concise answers. Do not give any explanations, only a short answer.
@@ -162,7 +164,7 @@ model.print_trainable_parameters()
 
 # --- 5. Training Setup ---
 training_args = TrainingArguments(
-    output_dir="./qwen_hotpot_finetuned",
+    output_dir=OUTPUT_DIR,
     num_train_epochs=1,                     # Kept low for speed, increase for better results
     per_device_train_batch_size=4,          # Adjust based on VRAM
     gradient_accumulation_steps=4,
@@ -170,7 +172,10 @@ training_args = TrainingArguments(
     lr_scheduler_type="cosine",
     warmup_ratio=0.03,
     logging_steps=10,
-    save_strategy="epoch",
+    save_strategy="steps",      # Save frequently (not just at end of epoch)
+    save_steps=50,              # Save every 50 steps (adjust based on speed)
+    save_total_limit=2,         # Only keep the last 2 checkpoints to save disk space
+
     fp16=True,                              # Use fp16 (or bf16 if Ampere GPU)
     optim="adamw_torch",
     report_to="none",
@@ -186,8 +191,17 @@ trainer = Trainer(
 )
 
 # --- 6. Train & Save ---
-print("Starting training...")
-trainer.train()
+print("Checking for existing checkpoints...")
+
+# Check if a checkpoint exists in the output directory
+last_checkpoint = get_last_checkpoint(OUTPUT_DIR)
+
+if last_checkpoint:
+    print(f"Resuming training from checkpoint: {last_checkpoint}")
+    trainer.train(resume_from_checkpoint=last_checkpoint)
+else:
+    print("No checkpoint found. Starting training from scratch...")
+    trainer.train()
 
 print("Saving adapter...")
 trainer.save_model("./qwen_hotpot_adapter")

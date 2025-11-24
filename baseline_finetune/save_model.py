@@ -8,10 +8,6 @@ from peft import PeftModel
 MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
 NEW_MODEL_NAME = "Qwen2.5-7B-Instruct-HotpotQA-Finetuned"
 HF_USERNAME = "fsiddiqui2" 
-DATASET_NAME = "hotpot_qa"
-SUBSET_NAME = "fullwiki"
-SPLIT = "train"
-NUM_SAMPLES = 1000
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
 tokenizer.padding_side = "right" # Important for training
