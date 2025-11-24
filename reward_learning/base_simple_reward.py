@@ -577,8 +577,8 @@ class SimpleRLTrainer:
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 max_new_tokens=self.config.max_new_tokens,
-                do_sample=True,              # ← Changed from False
-                temperature=0.7,             # ← Add this
+                do_sample=False           # ← Changed from False
+                temperature=1.0           # ← Add this
                 pad_token_id=self.tokenizer.pad_token_id,
                 return_dict_in_generate=True,
                 output_scores=True
