@@ -340,6 +340,13 @@ Answer: """
     print(f"  Precision: {metrics['Precision']:.2f}%")
     print(f"  Recall: {metrics['Recall']:.2f}%")
 
+    # Clean up model from GPU memory
+    del model
+    del tokenizer
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+
     return metrics
 
 
@@ -588,6 +595,12 @@ def compare_baseline_vs_rlhf(
         gold_answers,
         verbose=False
     )
+
+    # Free GPU memory before loading RLHF model
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+    print("\nCleared GPU memory before loading RLHF model...")
 
     # Evaluate RLHF
     if model_type == "base":
