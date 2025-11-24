@@ -18,7 +18,6 @@ from transformers.trainer_utils import get_last_checkpoint
 # huggingface_hub.login(token="YOUR_HF_TOKEN_HERE") 
 
 MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
-NEW_MODEL_NAME = "Qwen2.5-7B-Instruct-HotpotQA-Finetuned-10000"
 HF_USERNAME = "fsiddiqui2" 
 DATASET_NAME = "hotpot_qa"
 SUBSET_NAME = "fullwiki"

@@ -11,7 +11,7 @@ import json # Added for JSON saving
 
 # --- Configuration ---
 # MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
-MODEL_ID = "fsiddiqui2/Qwen2.5-7B-Instruct-HotpotQA-Finetuned"
+MODEL_ID = "fsiddiqui2/Qwen2.5-7B-Instruct-HotpotQA-Finetuned-10000"
 DATASET_NAME = "hotpot_qa"
 SUBSET_NAME = "fullwiki"
 SPLIT = "validation"
