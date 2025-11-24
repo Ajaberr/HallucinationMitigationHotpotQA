@@ -420,12 +420,13 @@ class SimpleRLTrainer:
         )
 
         if is_lora_checkpoint:
-            # Load saved LoRA adapters from checkpoint
+            # Load saved LoRA adapters from checkpoint with 4-bit quantization
             print(f"Loading LoRA checkpoint from {config.policy_model_name}...")
             self.policy = AutoPeftModelForCausalLM.from_pretrained(
                 config.policy_model_name,
                 device_map="auto",
-                low_cpu_mem_usage=True
+                low_cpu_mem_usage=True,
+                quantization_config=bnb_config
             )
             print("LoRA checkpoint loaded successfully!")
         else:
