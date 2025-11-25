@@ -369,7 +369,7 @@ class SimpleRLConfig:
     max_new_tokens: int = 64
     temperature: float = 1.0
     top_p: float = 0.9
-    kl_penalty: float = 0.02  # KL divergence penalty coefficient (0.0 = no penalty, 0.01-0.1 = recommended)
+    kl_penalty: float = 0.1  # KL divergence penalty coefficient (0.0 = no penalty, 0.01-0.1 = recommended)
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -1077,14 +1077,17 @@ def main():
         batch_size=2,              # ← Reduced from 4 to save memory
         num_epochs=1,
         max_new_tokens=20,
-        kl_penalty=0.1           # ← Disabled to save memory (no reference policy)
+        kl_penalty=0.0        # ← Set to 0.0 to disable reference policy and save ~11GB GPU memory
     )
 
     # Initialize RL trainer
     print(f"\nInitializing REINFORCE trainer...")
     print(f"Device: {rl_config.device}")
     print(f"Policy Model: {rl_config.policy_model_name}")
-    print(f"KL Penalty: {rl_config.kl_penalty} (prevents policy drift from reference)")
+    if rl_config.kl_penalty > 0.0:
+        print(f"KL Penalty: {rl_config.kl_penalty} (prevents policy drift from reference)")
+    else:
+        print(f"KL Penalty: DISABLED (saves ~11GB GPU memory by not loading reference policy)")
     rl_trainer = SimpleRLTrainer(rl_config, reward_model)
 
     # Load HotpotQA training data (10,000 samples from positions 10001-20000)
