@@ -314,9 +314,11 @@ Answer: """
             output = model.generate(
                 **inputs,
                 max_new_tokens=50,
-                do_sample=False,
-                num_beams=1,
-                pad_token_id=tokenizer.eos_token_id
+                do_sample=True,  # Use sampling (same as RLHF)
+                top_p=0.9,  # Nucleus sampling
+                temperature=0.8,  # Same as RLHF training
+                pad_token_id=tokenizer.eos_token_id,
+                eos_token_id=tokenizer.eos_token_id
             )
 
         # Decode the generated text, skipping the input prompt
