@@ -797,11 +797,10 @@ class SimpleRLTrainer:
             gen_ids = self.policy.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_new_tokens=self.config.max_new_tokens,
-                do_sample=True,
-                top_p=self.config.top_p,
-                temperature=self.config.temperature,
-                pad_token_id=self.tokenizer.pad_token_id
+                max_new_tokens=64,  # Use reasonable length for evaluation
+                do_sample=False,  # Greedy decoding for stable evaluation
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id  # CRITICAL: Tell model when to stop
             )
 
             # Decode only the generated part (skip the prompt)
