@@ -522,6 +522,9 @@ class SimpleRLTrainer:
         outputs = self.policy(input_ids=input_ids, attention_mask=attention_mask)
         logits = outputs.logits[:, :-1, :]  # [B, T-1, V] - predict next token
 
+        # NUMERICAL SAFETY: clamp logits to avoid NaN in softmax
+        logits = torch.clamp(logits, -50, 50)
+
         # Convert to log probabilities
         log_probs = torch.log_softmax(logits, dim=-1)  # [B, T-1, V]
 
@@ -567,27 +570,21 @@ class SimpleRLTrainer:
         attention_mask = encoded["attention_mask"].to(self.device)
         prompt_len = input_ids.size(1)
 
-        # 2) Sample responses from policy π_θ(y|x) with scores
+        # 2) Sample responses from policy π_θ(y|x) - sequence-only generation (memory-safe)
         # IMPORTANT: Set to eval mode for generation to avoid NaN with LoRA + quantization
         self.policy.eval()
         with torch.no_grad():
-            # Use greedy decoding instead of sampling to avoid numerical instability
-            # with LoRA + 4-bit quantization
-            gen_outputs = self.policy.generate(
+            # Use sampling WITHOUT requesting scores/logits (avoids huge memory usage)
+            gen_ids = self.policy.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 max_new_tokens=self.config.max_new_tokens,
-                do_sample=False, 
-                temperature=1.0,        # ← Add this
+                do_sample=True,              # Probabilistic decoding ON
+                top_p=0.9,                   # Nucleus sampling
+                temperature=0.8,             # Not too low, not too high
                 pad_token_id=self.tokenizer.pad_token_id,
-                return_dict_in_generate=True,
-                output_scores=True
-            )
-            gen_ids = gen_outputs.sequences  # [B, T_total]
-            scores = gen_outputs.scores  # Tuple of [B, V] for each generated token
-
-        # Stack scores into logits [B, T_gen, V]
-        gen_logits = torch.stack(scores, dim=1)  # [B, T_gen, V]
+                return_dict_in_generate=False  # Returns sequences only, not dict
+            )  # [B, T_total]
 
         # Extract only generated part
         generated_sequences = gen_ids[:, prompt_len:]  # [B, T_gen]
@@ -598,35 +595,77 @@ class SimpleRLTrainer:
             skip_special_tokens=True
         )
 
-        # Create mask for generated tokens
-        gen_mask = (generated_sequences != self.tokenizer.pad_token_id).float()
+        # 3) Recompute logits safely via separate forward pass (NUMERICAL SAFETY)
+        # This is needed for: (a) REINFORCE log_probs, (b) entropy-based confidence
+        gen_attention = (gen_ids != self.tokenizer.pad_token_id).long()
 
-        # 3) Compute rewards using verifier + confidence (HotpotQA context vs generated answer)
         with torch.no_grad():
-            reward_info = self.reward_model.compute_rewards(
-                evidences=evidences,  # Use HotpotQA context as evidence/premise
-                answers=generated_answers,
-                logits=gen_logits,
-                mask=gen_mask
+            outputs = self.policy(
+                input_ids=gen_ids,
+                attention_mask=gen_attention
             )
-            rewards = reward_info["rewards"]  # [B]
+            logits = outputs.logits[:, :-1, :]  # [B, T_total-1, V] - predict next token
+
+            # NUMERICAL SAFETY: clamp logits to avoid NaN in softmax
+            logits = torch.clamp(logits, -50, 50)
+
+            # Compute log probabilities for all positions (stable)
+            log_probs_all = torch.log_softmax(logits, dim=-1)  # [B, T_total-1, V]
+
+        # 4) Compute entropy-based confidence from recomputed logits (response tokens only)
+        import math
+        with torch.no_grad():
+            # Compute probabilities and entropy per token
+            probs = log_probs_all.exp()  # [B, T_total-1, V]
+            entropy = -(probs * log_probs_all).sum(dim=-1)  # [B, T_total-1]
+
+            # Mask: only response positions (>= prompt_len-1 due to shift)
+            resp_mask = torch.zeros_like(entropy)
+            resp_mask[:, prompt_len-1:] = 1.0
+
+            # Average entropy over response tokens
+            sum_entropy = (entropy * resp_mask).sum(dim=1)
+            num_resp_tokens = resp_mask.sum(dim=1).clamp(min=1)
+            avg_entropy = sum_entropy / num_resp_tokens  # [B]
+
+            # Normalize by log(vocab_size) and compute confidence
+            max_entropy = math.log(self.tokenizer.vocab_size)
+            conf = 1.0 - (avg_entropy / max_entropy)
+            conf = torch.clamp(conf, 0.0, 1.0)
+            conf = torch.nan_to_num(conf, nan=0.0)  # Safety for NaNs
+
+        # 5) Compute factuality scores using verifier (no logits needed)
+        with torch.no_grad():
+            p_ent, p_cont, f = self.reward_model.verifier.compute_factuality_score(
+                evidences=evidences,  # Use HotpotQA context as evidence/premise
+                answers=generated_answers
+            )
+
+            # Compute final reward: R = f * (λ_base + λ_conf * conf)
+            lambda_base = self.reward_model.lambda_base
+            lambda_conf = self.reward_model.lambda_conf
+            rewards = f * (lambda_base + lambda_conf * conf)  # [B]
 
         # Clear CUDA cache to free memory before gradient-requiring forward pass
         torch.cuda.empty_cache()
 
-        # 4) Compute log π_θ(ŷ | x) for sampled responses
+        # 6) Compute log π_θ(ŷ | x) for sampled responses (REINFORCE)
         # Need to re-run forward pass for gradients - set back to train mode
         self.policy.train()
         gen_attention = (gen_ids != self.tokenizer.pad_token_id).long()
         log_probs = self.compute_logprobs(gen_ids, gen_attention, prompt_len)  # [B]
 
-        # 4b) Compute reference log probs for KL divergence penalty (if enabled)
+        # 6b) Compute reference log probs for KL divergence penalty (if enabled)
         ref_log_probs = None
         if self.ref_policy is not None:
             with torch.no_grad():
                 # Compute log probs using frozen reference policy
                 ref_outputs = self.ref_policy(input_ids=gen_ids, attention_mask=gen_attention)
                 ref_logits = ref_outputs.logits[:, :-1, :]  # [B, T-1, V]
+
+                # NUMERICAL SAFETY: clamp logits to avoid NaN
+                ref_logits = torch.clamp(ref_logits, -50, 50)
+
                 ref_log_probs_all = torch.log_softmax(ref_logits, dim=-1)  # [B, T-1, V]
 
                 # Get log probs for actual tokens
@@ -640,7 +679,7 @@ class SimpleRLTrainer:
                 # Sum log probs over response tokens
                 ref_log_probs = (ref_token_logprobs * mask).sum(dim=1)  # [B]
 
-        # 5) REINFORCE loss with baseline and KL penalty
+        # 7) REINFORCE loss with baseline and KL penalty
         loss, loss_metrics = self.loss_fn.compute_loss(rewards, log_probs, ref_log_probs)
 
         # Backward pass
@@ -650,8 +689,8 @@ class SimpleRLTrainer:
 
         # Extra metrics
         extra_metrics = {
-            "mean_factuality": reward_info["f"].mean().item(),
-            "mean_confidence": reward_info["conf"].mean().item(),
+            "mean_factuality": f.mean().item(),
+            "mean_confidence": conf.mean().item(),
             **loss_metrics
         }
 
@@ -1050,7 +1089,7 @@ def main():
     from datasets import load_dataset
 
     dataset = load_dataset("hotpot_qa", "fullwiki", split="train")
-    dataset = dataset.select(range(10000, 20000))
+    dataset = dataset.select(range(10000, 11000))
 
     training_data = []
     for example in dataset:
