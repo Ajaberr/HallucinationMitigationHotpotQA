@@ -1074,10 +1074,10 @@ def main():
     rl_config = SimpleRLConfig(
         policy_model_name=policy_model,
         learning_rate=5e-7,        # ← Reduced from 1e-5
-        batch_size=4,              # ← Increased from 1
+        batch_size=2,              # ← Reduced from 4 to save memory
         num_epochs=1,
         max_new_tokens=20,
-        kl_penalty=0.1             # ← Increased from 0.02
+        kl_penalty=0.1           # ← Disabled to save memory (no reference policy)
     )
 
     # Initialize RL trainer
