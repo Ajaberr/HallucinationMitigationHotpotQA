@@ -405,6 +405,9 @@ class SimpleRLTrainer:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
+        # IMPORTANT: Decoder-only models require left-padding for generation
+        self.tokenizer.padding_side = 'left'
+
         # Load model with 4-bit quantization + LoRA (matching qwen-finetune.py approach)
         from transformers import BitsAndBytesConfig
         from peft import LoraConfig, get_peft_model, AutoPeftModelForCausalLM
