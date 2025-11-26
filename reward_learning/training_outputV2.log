@@ -1,0 +1,446 @@
+nohup: ignoring input
+======================================================================
+Verifier-Based Reward Learning RLHF (Qwen2-7B)
+======================================================================
+
+======================================================================
+Initializing Verifier-Based Reward Model
+======================================================================
+
+Loading pre-trained NLI verifier...
+Device: cuda
+Verifier: MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli
+
+======================================================================
+Testing Verifier-Based Reward:
+======================================================================
+
+Q: What is the capital of France?
+A: Paris
+Reward: 0.3498
+
+Q: What is the capital of France?
+A: The capital of France is Paris.
+Reward: 0.3852
+
+Q: What is the capital of France?
+A: London
+Reward: -0.4970
+
+Q: Who invented the telephone?
+A: Alexander Graham Bell
+Reward: 0.1601
+
+Q: Who invented the telephone?
+A: Thomas Edison
+Reward: 0.0106
+
+======================================================================
+Testing Response Comparison:
+======================================================================
+
+Question: What is the capital of France?
+
+Response A: Paris
+Score A: 0.3498
+
+Response B: London
+Score B: -0.4970
+
+P(A preferred over B): 0.6999
+
+Saving reward model configuration...
+Reward config saved to verifier_reward_config.pt
+
+======================================================================
+REINFORCE Policy Training with Verifier Rewards
+======================================================================
+
+Initializing REINFORCE trainer...
+Device: cuda
+Policy Model: fsiddiqui2/Qwen2.5-7B-Instruct-HotpotQA-Finetuned-10000
+KL Penalty: DISABLED (saves ~11GB GPU memory by not loading reference policy)
+Loading base model fsiddiqui2/Qwen2.5-7B-Instruct-HotpotQA-Finetuned-10000 with LoRA adapters...
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:27<01:23, 27.71s/it]Loading checkpoint shards:  50%|█████     | 2/4 [00:55<00:55, 27.88s/it]Loading checkpoint shards:  75%|███████▌  | 3/4 [01:20<00:26, 26.37s/it]Loading checkpoint shards: 100%|██████████| 4/4 [01:26<00:00, 18.38s/it]Loading checkpoint shards: 100%|██████████| 4/4 [01:26<00:00, 21.60s/it]
+trainable params: 40,370,176 || all params: 7,655,986,688 || trainable%: 0.5273
+
+Loading HotpotQA training data (10,000 samples from positions 10001-20000)...
+Loaded 1000 training samples from HotpotQA (with context for verification)
+
+Training policy with REINFORCE + verifier rewards (1000 samples)...
+Training setup:
+  - Policy: Closed-book QA (no context in prompt)
+  - Verifier: Uses HotpotQA context to verify factuality of generated answers
+  - KL Penalty: β=0.0 (prevents catastrophic forgetting)
+
+======================================================================
+REINFORCE Policy Training with Verifier-Based Rewards
+======================================================================
+Epoch 1/1, Step 0
+  Loss: 0.0663, Reward: 0.0885
+  Factuality: 0.1099, Confidence: 0.8286
+Epoch 1/1, Step 10
+  Loss: -6.3600, Reward: -0.1445
+  Factuality: -0.1835, Confidence: 0.7969
+Epoch 1/1, Step 20
+  Loss: 9.4779, Reward: -0.4042
+  Factuality: -0.4179, Confidence: 0.8496
+Epoch 1/1, Step 30
+  Loss: -0.3310, Reward: -0.4318
+  Factuality: -0.4872, Confidence: 0.7769
+Epoch 1/1, Step 40
+  Loss: -0.8592, Reward: -0.6950
+  Factuality: -0.7957, Confidence: 0.7705
+Epoch 1/1, Step 50
+  Loss: 2.0782, Reward: 0.0390
+  Factuality: 0.0668, Confidence: 0.8379
+Epoch 1/1, Step 60
+  Loss: -0.8769, Reward: -0.1681
+  Factuality: -0.1968, Confidence: 0.8384
+Epoch 1/1, Step 70
+  Loss: 2.9130, Reward: -0.0509
+  Factuality: -0.0367, Confidence: 0.7983
+Epoch 1/1, Step 80
+  Loss: 2.1357, Reward: -0.6113
+  Factuality: -0.6640, Confidence: 0.8252
+Epoch 1/1, Step 90
+  Loss: 1.3604, Reward: -0.5438
+  Factuality: -0.5856, Confidence: 0.8047
+Epoch 1/1, Step 100
+  Loss: 0.6697, Reward: -0.8648
+  Factuality: -0.9558, Confidence: 0.8062
+Epoch 1/1, Step 110
+  Loss: -43.7129, Reward: -0.2329
+  Factuality: -0.2730, Confidence: 0.8291
+Epoch 1/1, Step 120
+  Loss: -4.4586, Reward: -0.0764
+  Factuality: -0.1138, Confidence: 0.8271
+Epoch 1/1, Step 130
+  Loss: 0.2654, Reward: -0.4382
+  Factuality: -0.4957, Confidence: 0.7422
+Epoch 1/1, Step 140
+  Loss: 0.0934, Reward: -0.1595
+  Factuality: -0.1597, Confidence: 0.9590
+Epoch 1/1, Step 150
+  Loss: -6.0051, Reward: -0.1032
+  Factuality: -0.1577, Confidence: 0.7915
+Epoch 1/1, Step 160
+  Loss: -8.5506, Reward: -0.0814
+  Factuality: -0.1130, Confidence: 0.8540
+Epoch 1/1, Step 170
+  Loss: -0.0814, Reward: 0.2181
+  Factuality: 0.2515, Confidence: 0.6938
+Epoch 1/1, Step 180
+  Loss: -1.8292, Reward: -0.2584
+  Factuality: -0.3153, Confidence: 0.8062
+Epoch 1/1, Step 190
+  Loss: 4.5864, Reward: -0.3022
+  Factuality: -0.2937, Confidence: 0.8740
+Epoch 1/1, Step 200
+  Loss: 1.4227, Reward: 0.0961
+  Factuality: 0.1169, Confidence: 0.7817
+Epoch 1/1, Step 210
+  Loss: -1.8256, Reward: 0.1694
+  Factuality: 0.1649, Confidence: 0.7568
+Epoch 1/1, Step 220
+  Loss: -1.5518, Reward: 0.2153
+  Factuality: 0.2284, Confidence: 0.7920
+Epoch 1/1, Step 230
+  Loss: 3.5146, Reward: -0.1922
+  Factuality: -0.2322, Confidence: 0.6885
+Epoch 1/1, Step 240
+  Loss: -1.9935, Reward: -0.0572
+  Factuality: -0.1010, Confidence: 0.7559
+Epoch 1/1, Step 250
+  Loss: -0.0840, Reward: 0.1099
+  Factuality: 0.1201, Confidence: 0.8037
+Epoch 1/1, Step 260
+  Loss: -4.4929, Reward: 0.2791
+  Factuality: 0.2911, Confidence: 0.8496
+Epoch 1/1, Step 270
+  Loss: -0.5931, Reward: 0.0819
+  Factuality: 0.0646, Confidence: 0.8213
+Epoch 1/1, Step 280
+  Loss: 0.0687, Reward: -0.3738
+  Factuality: -0.3778, Confidence: 0.9766
+Epoch 1/1, Step 290
+  Loss: 4.2812, Reward: -0.1919
+  Factuality: -0.1801, Confidence: 0.8335
+Epoch 1/1, Step 300
+  Loss: 0.5669, Reward: 0.0865
+  Factuality: 0.1055, Confidence: 0.6411
+Epoch 1/1, Step 310
+  Loss: 1.4660, Reward: -0.3196
+  Factuality: -0.3311, Confidence: 0.8232
+Epoch 1/1, Step 320
+  Loss: -2.5414, Reward: 0.2163
+  Factuality: 0.2313, Confidence: 0.7842
+Epoch 1/1, Step 330
+  Loss: -0.6267, Reward: -0.0677
+  Factuality: -0.0802, Confidence: 0.7861
+Epoch 1/1, Step 340
+  Loss: -1.8848, Reward: 0.0037
+  Factuality: -0.0256, Confidence: 0.7969
+Epoch 1/1, Step 350
+  Loss: 0.3191, Reward: -0.0655
+  Factuality: -0.0675, Confidence: 0.8062
+Epoch 1/1, Step 360
+  Loss: 0.2926, Reward: 0.0283
+  Factuality: 0.0391, Confidence: 0.7744
+Epoch 1/1, Step 370
+  Loss: 7.3157, Reward: -0.2437
+  Factuality: -0.2641, Confidence: 0.8081
+Epoch 1/1, Step 380
+  Loss: 0.3936, Reward: -0.2523
+  Factuality: -0.2601, Confidence: 0.8408
+Epoch 1/1, Step 390
+  Loss: -0.0319, Reward: 0.0105
+  Factuality: 0.0111, Confidence: 0.8423
+Epoch 1/1, Step 400
+  Loss: 0.4266, Reward: -0.2756
+  Factuality: -0.2804, Confidence: 0.9336
+Epoch 1/1, Step 410
+  Loss: -0.5873, Reward: -0.2988
+  Factuality: -0.3542, Confidence: 0.7402
+Epoch 1/1, Step 420
+  Loss: 4.9203, Reward: -0.1368
+  Factuality: -0.1348, Confidence: 0.8184
+Epoch 1/1, Step 430
+  Loss: -0.0518, Reward: -0.0029
+  Factuality: -0.0028, Confidence: 0.8789
+Epoch 1/1, Step 440
+  Loss: 1.3007, Reward: -0.4699
+  Factuality: -0.4853, Confidence: 0.8477
+Epoch 1/1, Step 450
+  Loss: -0.0092, Reward: 0.3706
+  Factuality: 0.4075, Confidence: 0.8184
+Epoch 1/1, Step 460
+  Loss: 2.3707, Reward: -0.1693
+  Factuality: -0.1591, Confidence: 0.8276
+Epoch 1/1, Step 470
+  Loss: -0.5932, Reward: 0.0550
+  Factuality: 0.0607, Confidence: 0.7266
+Epoch 1/1, Step 480
+  Loss: -1.1450, Reward: 0.6234
+  Factuality: 0.6562, Confidence: 0.8564
+Epoch 1/1, Step 490
+  Loss: -0.5702, Reward: -0.1582
+  Factuality: -0.1794, Confidence: 0.7822
+Epoch 1/1, Step 500
+  Loss: 0.6836, Reward: 0.1452
+  Factuality: 0.1616, Confidence: 0.8906
+Epoch 1/1, Step 510
+  Loss: -0.2860, Reward: -0.6510
+  Factuality: -0.7259, Confidence: 0.8032
+Epoch 1/1, Step 520
+  Loss: -0.0763, Reward: -0.0463
+  Factuality: -0.0545, Confidence: 0.8389
+Epoch 1/1, Step 530
+  Loss: 0.4864, Reward: -0.3532
+  Factuality: -0.3829, Confidence: 0.8047
+Epoch 1/1, Step 540
+  Loss: 8.5667, Reward: -0.2191
+  Factuality: -0.2247, Confidence: 0.7930
+Epoch 1/1, Step 550
+  Loss: 0.3645, Reward: -0.0476
+  Factuality: -0.0393, Confidence: 0.9141
+Epoch 1/1, Step 560
+  Loss: -0.7031, Reward: -0.3143
+  Factuality: -0.3297, Confidence: 0.9419
+Epoch 1/1, Step 570
+  Loss: 46.8526, Reward: 0.3050
+  Factuality: 0.3275, Confidence: 0.7905
+Epoch 1/1, Step 580
+  Loss: 0.4651, Reward: -0.6142
+  Factuality: -0.6423, Confidence: 0.8950
+Epoch 1/1, Step 590
+  Loss: 0.0083, Reward: -0.3203
+  Factuality: -0.3227, Confidence: 0.9712
+Epoch 1/1, Step 600
+  Loss: -0.0756, Reward: 0.0839
+  Factuality: 0.0882, Confidence: 0.8682
+Epoch 1/1, Step 610
+  Loss: 0.1468, Reward: 0.0692
+  Factuality: 0.0774, Confidence: 0.7939
+Epoch 1/1, Step 620
+  Loss: 0.1763, Reward: 0.5319
+  Factuality: 0.5719, Confidence: 0.8706
+Epoch 1/1, Step 630
+  Loss: 2.4340, Reward: 0.3466
+  Factuality: 0.3990, Confidence: 0.7896
+Epoch 1/1, Step 640
+  Loss: 3.9360, Reward: -0.2967
+  Factuality: -0.3330, Confidence: 0.7197
+Epoch 1/1, Step 650
+  Loss: -2.4752, Reward: 0.0616
+  Factuality: 0.0564, Confidence: 0.8755
+Epoch 1/1, Step 660
+  Loss: -0.1150, Reward: 0.2398
+  Factuality: 0.2711, Confidence: 0.7617
+Epoch 1/1, Step 670
+  Loss: -0.3323, Reward: 0.3047
+  Factuality: 0.3188, Confidence: 0.8945
+Epoch 1/1, Step 680
+  Loss: 0.6066, Reward: 0.3126
+  Factuality: 0.3554, Confidence: 0.8120
+Epoch 1/1, Step 690
+  Loss: -2.0430, Reward: 0.1515
+  Factuality: 0.1439, Confidence: 0.7583
+Epoch 1/1, Step 700
+  Loss: -2.3258, Reward: 0.4741
+  Factuality: 0.4763, Confidence: 0.8530
+Epoch 1/1, Step 710
+  Loss: 1.2274, Reward: -0.7782
+  Factuality: -0.8180, Confidence: 0.8809
+Epoch 1/1, Step 720
+  Loss: -0.3635, Reward: -0.4069
+  Factuality: -0.4459, Confidence: 0.8525
+Epoch 1/1, Step 730
+  Loss: -0.5976, Reward: -0.2276
+  Factuality: -0.2581, Confidence: 0.8276
+Epoch 1/1, Step 740
+  Loss: 0.4585, Reward: 0.4920
+  Factuality: 0.5446, Confidence: 0.8638
+Epoch 1/1, Step 750
+  Loss: -0.8751, Reward: 0.2441
+  Factuality: 0.2641, Confidence: 0.7666
+Epoch 1/1, Step 760
+  Loss: -1.4996, Reward: 0.5246
+  Factuality: 0.5416, Confidence: 0.8184
+Epoch 1/1, Step 770
+  Loss: 1.8483, Reward: -0.6415
+  Factuality: -0.7134, Confidence: 0.7573
+Epoch 1/1, Step 780
+  Loss: 0.4140, Reward: -0.0961
+  Factuality: -0.1180, Confidence: 0.6729
+Epoch 1/1, Step 790
+  Loss: 0.0671, Reward: 0.1560
+  Factuality: 0.1777, Confidence: 0.7661
+Epoch 1/1, Step 800
+  Loss: -1.0078, Reward: 0.3236
+  Factuality: 0.3276, Confidence: 0.8271
+Epoch 1/1, Step 810
+  Loss: -0.2330, Reward: 0.7260
+  Factuality: 0.7581, Confidence: 0.9053
+Epoch 1/1, Step 820
+  Loss: 0.7179, Reward: -0.4368
+  Factuality: -0.4761, Confidence: 0.8174
+Epoch 1/1, Step 830
+  Loss: 0.5583, Reward: -0.4407
+  Factuality: -0.4749, Confidence: 0.8184
+Epoch 1/1, Step 840
+  Loss: 0.1950, Reward: 0.2122
+  Factuality: 0.2389, Confidence: 0.8247
+Epoch 1/1, Step 850
+  Loss: 0.1777, Reward: -0.3257
+  Factuality: -0.3557, Confidence: 0.8203
+Epoch 1/1, Step 860
+  Loss: 0.1882, Reward: 0.0574
+  Factuality: 0.0678, Confidence: 0.8398
+Epoch 1/1, Step 870
+  Loss: -0.4793, Reward: 0.3656
+  Factuality: 0.3818, Confidence: 0.9141
+Epoch 1/1, Step 880
+  Loss: 0.3263, Reward: -0.1168
+  Factuality: -0.1289, Confidence: 0.6821
+Epoch 1/1, Step 890
+  Loss: 11.9343, Reward: -0.3929
+  Factuality: -0.3825, Confidence: 0.8506
+Epoch 1/1, Step 900
+  Loss: 0.4357, Reward: 0.2707
+  Factuality: 0.3052, Confidence: 0.8311
+Epoch 1/1, Step 910
+  Loss: -0.0958, Reward: -0.8711
+  Factuality: -0.9275, Confidence: 0.8833
+Epoch 1/1, Step 920
+  Loss: -0.5181, Reward: 0.4634
+  Factuality: 0.5192, Confidence: 0.7666
+Epoch 1/1, Step 930
+  Loss: -4.6424, Reward: -0.5809
+  Factuality: -0.6574, Confidence: 0.7930
+Epoch 1/1, Step 940
+  Loss: 0.2013, Reward: -0.1224
+  Factuality: -0.1276, Confidence: 0.8857
+Epoch 1/1, Step 950
+  Loss: 1.3242, Reward: -0.3390
+  Factuality: -0.3473, Confidence: 0.7964
+Epoch 1/1, Step 960
+  Loss: -2.6211, Reward: 0.2400
+  Factuality: 0.2066, Confidence: 0.8477
+Epoch 1/1, Step 970
+  Loss: 0.3632, Reward: 0.3711
+  Factuality: 0.4244, Confidence: 0.8184
+Epoch 1/1, Step 980
+  Loss: 0.0171, Reward: 0.1490
+  Factuality: 0.1711, Confidence: 0.7480
+Epoch 1/1, Step 990
+  Loss: 0.5875, Reward: -0.0516
+  Factuality: -0.0503, Confidence: 0.8047
+
+Epoch 1 completed:
+  Avg Loss: 0.3062, Avg Reward: -0.0908
+  Avg Factuality: -0.0995, Avg Confidence: 0.8185
+
+Training Results:
+Final RL Loss: 0.3062
+Final Avg Reward: -0.0908
+Final Avg Factuality: -0.0995
+Final Avg Confidence: 0.8185
+
+======================================================================
+Testing Trained Policy:
+======================================================================
+
+Q: What is the capital of France?
+A:  Paris
+Reward: 0.3498
+
+Q: Who invented the telephone?
+A:  A. Alexander Graham Bell B. Thomas Edison C. James Joyce D. Benjamin Franklin
+
+Alexander Graham
+Reward: -0.1013
+
+Q: What is photosynthesis?
+A:  It is a process that green plants use to convert light energy into chemical energy stored in sugar. Light
+Reward: 0.4812
+
+======================================================================
+Saving trained policy...
+Saving LoRA adapters to verifier_rlhf_policy...
+LoRA adapters saved to verifier_rlhf_policy
+
+Merging LoRA adapters with base model...
+
+======================================================================
+Merging LoRA adapters with base model...
+======================================================================
+Loading base model fsiddiqui2/Qwen2.5-7B-Instruct-HotpotQA-Finetuned-10000 in FP16...
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:01<00:04,  1.55s/it]Loading checkpoint shards:  50%|█████     | 2/4 [00:03<00:03,  1.56s/it]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:03<00:01,  1.14s/it]Loading checkpoint shards: 100%|██████████| 4/4 [00:03<00:00,  1.06it/s]
+Some parameters are on the meta device because they were offloaded to the cpu.
+Loading LoRA adapters from verifier_rlhf_policy...
+Merging adapters into base model...
+Saving merged model to verifier_rlhf_full_model...
+/home/ahmed/COMS4705-Final-Project/venv/lib/python3.10/site-packages/transformers/modeling_utils.py:3970: UserWarning: Attempting to save a model with offloaded modules. Ensure that unallocated cpu memory exceeds the `shard_size` (5GB default)
+  warnings.warn(
+Saving checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Saving checkpoint shards:  25%|██▌       | 1/4 [00:21<01:04, 21.53s/it]Saving checkpoint shards:  50%|█████     | 2/4 [00:48<00:49, 24.97s/it]Saving checkpoint shards:  75%|███████▌  | 3/4 [01:12<00:24, 24.53s/it]Saving checkpoint shards: 100%|██████████| 4/4 [01:21<00:00, 18.04s/it]Saving checkpoint shards: 100%|██████████| 4/4 [01:21<00:00, 20.25s/it]
+Merged model saved to verifier_rlhf_full_model
+Pushing to HuggingFace Hub: jxrma/Qwen2.5-7B-RLHF-HotpotQA...
+Saving checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Saving checkpoint shards:   0%|          | 0/4 [00:08<?, ?it/s]
+Traceback (most recent call last):
+  File "/home/ahmed/COMS4705-Final-Project/reward_learning/base_simple_reward.py", line 1187, in <module>
+    main()
+  File "/home/ahmed/COMS4705-Final-Project/reward_learning/base_simple_reward.py", line 1165, in main
+    rl_trainer.merge_and_save_full_model(
+  File "/home/ahmed/COMS4705-Final-Project/reward_learning/base_simple_reward.py", line 887, in merge_and_save_full_model
+    model.push_to_hub(repo_id, safe_serialization=True)
+  File "/home/ahmed/COMS4705-Final-Project/venv/lib/python3.10/site-packages/transformers/modeling_utils.py", line 4227, in push_to_hub
+    return super().push_to_hub(*args, **kwargs)
+  File "/home/ahmed/COMS4705-Final-Project/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 980, in push_to_hub
+    self.save_pretrained(work_dir, max_shard_size=max_shard_size, safe_serialization=safe_serialization)
+  File "/home/ahmed/COMS4705-Final-Project/venv/lib/python3.10/site-packages/transformers/modeling_utils.py", line 4173, in save_pretrained
+    safe_save_file(shard, os.path.join(save_directory, shard_file), metadata=metadata)
+  File "/home/ahmed/COMS4705-Final-Project/venv/lib/python3.10/site-packages/safetensors/torch.py", line 307, in save_file
+    serialize_file(_flatten(tensors), filename, metadata=metadata)
+safetensors_rust.SafetensorError: Error while serializing: I/O error: No space left on device (os error 28)
