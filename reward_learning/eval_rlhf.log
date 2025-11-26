@@ -1,0 +1,12 @@
+nohup: ignoring input
+
+======================================================================
+RLHF EVALUATION - Base Model
+======================================================================
+
+Loading HotpotQA dataset (split: validation, samples: 1000)...
+Loaded 1000 questions from HotpotQA
+
+Loading policy from verifier_rlhf_full_model...
+Loading base model verifier_rlhf_full_model with LoRA adapters...
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:27<01:22, 27.67s/it]Loading checkpoint shards:  50%|█████     | 2/4 [00:55<00:55, 27.86s/it]Loading checkpoint shards:  75%|███████▌  | 3/4 [01:20<00:26, 26.44s/it]Loading checkpoint shards: 100%|██████████| 4/4 [01:26<00:00, 18.42s/it]Loading checkpoint shards: 100%|██████████| 4/4 [01:26<00:00, 21.63s/it]

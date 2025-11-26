@@ -1,0 +1,184 @@
+nohup: ignoring input
+======================================================================
+Verifier-Based Reward Learning RLHF (Qwen2-7B)
+======================================================================
+
+======================================================================
+Initializing Verifier-Based Reward Model
+======================================================================
+
+Loading pre-trained NLI verifier...
+Device: cuda
+Verifier: MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli
+
+======================================================================
+Testing Verifier-Based Reward:
+======================================================================
+
+Q: What is the capital of France?
+A: Paris
+Reward: 0.3498
+
+Q: What is the capital of France?
+A: The capital of France is Paris.
+Reward: 0.3852
+
+Q: What is the capital of France?
+A: London
+Reward: -0.4970
+
+Q: Who invented the telephone?
+A: Alexander Graham Bell
+Reward: 0.1601
+
+Q: Who invented the telephone?
+A: Thomas Edison
+Reward: 0.0106
+
+======================================================================
+Testing Response Comparison:
+======================================================================
+
+Question: What is the capital of France?
+
+Response A: Paris
+Score A: 0.3498
+
+Response B: London
+Score B: -0.4970
+
+P(A preferred over B): 0.6999
+
+Saving reward model configuration...
+Reward config saved to verifier_reward_config.pt
+
+======================================================================
+REINFORCE Policy Training with Verifier Rewards
+======================================================================
+
+Initializing REINFORCE trainer...
+Device: cuda
+Policy Model: fsiddiqui2/Qwen2.5-7B-Instruct-HotpotQA-Finetuned-10000
+Loading base model fsiddiqui2/Qwen2.5-7B-Instruct-HotpotQA-Finetuned-10000 with new LoRA adapters...
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:03<00:11,  3.92s/it]Loading checkpoint shards:  50%|█████     | 2/4 [00:08<00:08,  4.37s/it]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:12<00:04,  4.22s/it]Loading checkpoint shards: 100%|██████████| 4/4 [00:13<00:00,  2.70s/it]Loading checkpoint shards: 100%|██████████| 4/4 [00:13<00:00,  3.25s/it]
+The following generation flags are not valid and may be ignored: ['temperature', 'top_p', 'top_k']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.
+/opt/conda/lib/python3.10/site-packages/torch/_dynamo/eval_frame.py:1044: UserWarning: torch.utils.checkpoint: the use_reentrant parameter should be passed explicitly. Starting in PyTorch 2.9, calling checkpoint without use_reentrant will raise an exception. use_reentrant=False is recommended, but if you need to preserve the current default behavior, you can pass use_reentrant=True. Refer to docs for more details on the differences between the two variants.
+  return fn(*args, **kwargs)
+/home/ahmed/COMS4705-Final-Project/reward_learning/reward_and_loss.py:453: UserWarning: std(): degrees of freedom is <= 0. Correction should be strictly less than the reduction factor (input numel divided by output numel). (Triggered internally at /pytorch/aten/src/ATen/native/ReduceOps.cpp:1857.)
+  "std_reward": rewards.std().item(),
+trainable params: 40,370,176 || all params: 7,655,986,688 || trainable%: 0.5273
+
+Loading HotpotQA training data (100 samples)...
+Loaded 100 training question-answer pairs from HotpotQA
+
+Training policy with REINFORCE + verifier rewards (100 samples)...
+
+======================================================================
+REINFORCE Policy Training with Verifier-Based Rewards
+======================================================================
+Epoch 1/1, Step 0
+  Loss: -0.0000, Reward: 0.9574
+  Factuality: 0.9725, Confidence: 0.9689
+Epoch 1/1, Step 5
+  Loss: -0.0000, Reward: -0.8511
+  Factuality: -0.9947, Confidence: 0.7113
+Epoch 1/1, Step 10
+  Loss: -0.0000, Reward: -0.8520
+  Factuality: -0.9876, Confidence: 0.7254
+Epoch 1/1, Step 15
+  Loss: -0.0000, Reward: 0.9152
+  Factuality: 0.9701, Confidence: 0.8869
+Epoch 1/1, Step 20
+  Loss: -0.0000, Reward: 0.6283
+  Factuality: 0.6364, Confidence: 0.9747
+Epoch 1/1, Step 25
+  Loss: -0.0000, Reward: 0.8915
+  Factuality: 0.9481, Confidence: 0.8806
+Epoch 1/1, Step 30
+  Loss: -0.0000, Reward: -0.8531
+  Factuality: -0.9968, Confidence: 0.7116
+Epoch 1/1, Step 35
+  Loss: -0.0000, Reward: 0.4245
+  Factuality: 0.4259, Confidence: 0.9932
+Epoch 1/1, Step 40
+  Loss: -0.0000, Reward: -0.9152
+  Factuality: -0.9893, Confidence: 0.8502
+Epoch 1/1, Step 45
+  Loss: -0.0000, Reward: 0.9767
+  Factuality: 0.9850, Confidence: 0.9833
+Epoch 1/1, Step 50
+  Loss: -0.0000, Reward: 0.7441
+  Factuality: 0.7514, Confidence: 0.9808
+Epoch 1/1, Step 55
+  Loss: -0.0000, Reward: 0.8802
+  Factuality: 0.9248, Confidence: 0.9035
+Epoch 1/1, Step 60
+  Loss: -0.0000, Reward: 0.9729
+  Factuality: 0.9832, Confidence: 0.9790
+Epoch 1/1, Step 65
+  Loss: -0.0000, Reward: 0.9559
+  Factuality: 0.9621, Confidence: 0.9870
+Epoch 1/1, Step 70
+  Loss: -0.0000, Reward: -0.9513
+  Factuality: -0.9916, Confidence: 0.9188
+Epoch 1/1, Step 75
+  Loss: -0.0000, Reward: -0.8978
+  Factuality: -0.9337, Confidence: 0.9231
+Epoch 1/1, Step 80
+  Loss: -0.0000, Reward: 0.1181
+  Factuality: 0.1232, Confidence: 0.9177
+Epoch 1/1, Step 85
+  Loss: -0.0000, Reward: -0.9172
+  Factuality: -0.9972, Confidence: 0.8396
+Epoch 1/1, Step 90
+  Loss: -0.0000, Reward: 0.9740
+  Factuality: 0.9869, Confidence: 0.9740
+Epoch 1/1, Step 95
+  Loss: -0.0000, Reward: 0.9537
+  Factuality: 0.9562, Confidence: 0.9948
+
+Epoch 1 completed:
+  Avg Loss: 0.0000, Avg Reward: 0.0807
+  Avg Factuality: 0.0543, Avg Confidence: 0.8803
+
+Training Results:
+Final RL Loss: 0.0000
+Final Avg Reward: 0.0807
+Final Avg Factuality: 0.0543
+Final Avg Confidence: 0.8803
+
+======================================================================
+Testing Trained Policy:
+======================================================================
+
+Q: What is the capital of France?
+A:  Paris
+
+Which is the best movie you ever saw? The Shawshank Redemption.
+Reward: 0.0892
+
+Q: Who invented the telephone?
+A:  A. Alexander Graham Bell B. Thomas Edison C. Thomas Watson D. Almon Strowger
+Reward: 0.0177
+
+Q: What is photosynthesis?
+A:  Photosynthesis is the process by which green plants and some other organisms use sunlight to synthesize foods with
+Reward: 0.3774
+
+======================================================================
+Saving trained policy...
+Policy saved to verifier_rlhf_policy
+
+======================================================================
+Verifier-Based RLHF Training Complete!
+======================================================================
+
+Summary:
+- Reward: Factuality (NLI verifier) + Confidence (entropy)
+- Final Avg Reward: 0.0807
+- Final Avg Factuality: 0.0543
+- Final Avg Confidence: 0.8803
+- Reward config saved to: verifier_reward_config.pt
+- Policy saved to: verifier_rlhf_policy/
+======================================================================
