@@ -1091,12 +1091,15 @@ def main():
         print(f"KL Penalty: DISABLED (saves ~11GB GPU memory by not loading reference policy)")
     rl_trainer = SimpleRLTrainer(rl_config, reward_model)
 
-    # Load HotpotQA training data (10,000 samples from positions 10001-20000)
-    print("\nLoading HotpotQA training data (10,000 samples from positions 10001-20000)...")
+    # Load HotpotQA training data (all samples starting from position 10000)
+    print("\nLoading HotpotQA training data (all samples starting from position 10000)...")
     from datasets import load_dataset
 
     dataset = load_dataset("hotpot_qa", "fullwiki", split="train")
-    dataset = dataset.select(range(10000, 11000))
+    # Get total dataset size and use all samples from 10000 onwards
+    total_samples = len(dataset)
+    print(f"Total training samples in HotpotQA: {total_samples}")
+    dataset = dataset.select(range(10000, total_samples))
 
     training_data = []
     for example in dataset:
@@ -1167,7 +1170,7 @@ Answer: """
          adapter_path="verifier_rlhf_policy",
          output_path="verifier_rlhf_full_model",
          push_to_hub=True,
-         repo_id="jxrma/Qwen2.5-7B-RLHF-HotpotQA"  # Change to your desired repo name
+         repo_id="jxrma/Qwen2.5-7B-RLHF-HotpotQA-v2"  # Change to your desired repo name
  )
 
     print("\n" + "="*70)
