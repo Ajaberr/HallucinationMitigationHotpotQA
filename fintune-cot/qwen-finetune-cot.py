@@ -149,6 +149,8 @@ model = AutoModelForCausalLM.from_pretrained(
     attn_implementation="sdpa" if torch.cuda.is_available() else "eager"
 )
 
+print(f"Using device {model.device}")
+
 lora_config = LoraConfig(
     r=16,
     lora_alpha=32,
@@ -173,7 +175,7 @@ training_args = TrainingArguments(
     warmup_ratio=0.03,
     logging_steps=10,
     save_strategy="steps",      
-    save_steps=100,              
+    save_steps=50,              
     save_total_limit=2,         
     fp16=True,                              
     optim="adamw_torch",
