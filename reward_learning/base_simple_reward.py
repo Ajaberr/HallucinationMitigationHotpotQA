@@ -577,15 +577,14 @@ class SimpleRLTrainer:
         # IMPORTANT: Set to eval mode for generation to avoid NaN with LoRA + quantization
         self.policy.eval()
         with torch.no_grad():
-            # Use sampling WITHOUT requesting scores/logits (avoids huge memory usage)
+            # Use greedy decoding during training for stability
             gen_ids = self.policy.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 max_new_tokens=self.config.max_new_tokens,
-                do_sample=True,              # Probabilistic decoding ON
-                top_p=0.9,                   # Nucleus sampling
-                temperature=0.8,             # Not too low, not too high
+                do_sample=False,             # Use greedy decoding during training
                 pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
                 return_dict_in_generate=False  # Returns sequences only, not dict
             )  # [B, T_total]
 
@@ -1091,12 +1090,15 @@ def main():
         print(f"KL Penalty: DISABLED (saves ~11GB GPU memory by not loading reference policy)")
     rl_trainer = SimpleRLTrainer(rl_config, reward_model)
 
-    # Load HotpotQA training data (10,000 samples from positions 10001-20000)
-    print("\nLoading HotpotQA training data (10,000 samples from positions 10001-20000)...")
+    # Load HotpotQA training data (all samples starting from position 10000)
+    print("\nLoading HotpotQA training data (all samples starting from position 10000)...")
     from datasets import load_dataset
 
     dataset = load_dataset("hotpot_qa", "fullwiki", split="train")
-    dataset = dataset.select(range(10000, 11000))
+    # Get total dataset size and use all samples from 10000 onwards
+    total_samples = len(dataset)
+    print(f"Total training samples in HotpotQA: {total_samples}")
+    dataset = dataset.select(range(10000, total_samples))
 
     training_data = []
     for example in dataset:
@@ -1167,7 +1169,7 @@ Answer: """
          adapter_path="verifier_rlhf_policy",
          output_path="verifier_rlhf_full_model",
          push_to_hub=True,
-         repo_id="jxrma/Qwen2.5-7B-RLHF-HotpotQA"  # Change to your desired repo name
+         repo_id="jxrma/Qwen2.5-7B-RLHF-HotpotQA-v2"  # Change to your desired repo name
  )
 
     print("\n" + "="*70)

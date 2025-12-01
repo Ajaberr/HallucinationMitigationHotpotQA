@@ -7,19 +7,24 @@ import re
 import string
 from collections import Counter
 import numpy as np
-import json # Added for JSON saving
+import json
+import os
+from datetime import datetime
 
 # --- Configuration ---
-# MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
-MODEL_ID = "fsiddiqui2/Qwen2.5-7B-Instruct-HotpotQA-Finetuned-10000"
+# Allow environment variables to override defaults
+MODEL_ID = os.getenv("MODEL_ID", "fsiddiqui2/Qwen2.5-7B-Instruct-HotpotQA-Finetuned-10000")
 DATASET_NAME = "hotpot_qa"
 SUBSET_NAME = "fullwiki"
 SPLIT = "validation"
-NUM_SAMPLES = 1000
+NUM_SAMPLES = int(os.getenv("NUM_SAMPLES", "1000"))
 RAUQ_ALPHA = 0.2
-# Output filenames
-DETAILED_OUTPUT_FILE = "detailed_results.json"
-FINAL_METRICS_FILE = "final_metrics.json"
+# Output filenames (with timestamp and model name)
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+# Clean model name for filename (replace slashes and dots)
+model_name_clean = MODEL_ID.replace("/", "_").replace(".", "_").replace("\\", "_")
+DETAILED_OUTPUT_FILE = f"detailed_results_{model_name_clean}_{timestamp}.json"
+FINAL_METRICS_FILE = f"final_metrics_{model_name_clean}_{timestamp}.json"
 
 def load_model_and_tokenizer(model_id):
     """Loads the model and tokenizer, optimizing for available hardware."""
@@ -172,9 +177,11 @@ def main():
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=50,
-                do_sample=False,
-                num_beams=1,
+                do_sample=True,  # Use probabilistic sampling
+                top_p=0.9,  # Nucleus sampling
+                temperature=0.8,  # Same as RLHF training
                 pad_token_id=tokenizer.eos_token_id,
+                eos_token_id=tokenizer.eos_token_id,
                 output_attentions=True,
                 output_scores=True,
                 return_dict_in_generate=True
@@ -221,9 +228,16 @@ def main():
     avg_rauq = sum(rauq_scores) / len(rauq_scores)
 
     final_results = {
+        "timestamp": datetime.now().isoformat(),
         "model": MODEL_ID,
         "dataset": DATASET_NAME,
         "samples": NUM_SAMPLES,
+        "generation_config": {
+            "do_sample": True,
+            "top_p": 0.9,
+            "temperature": 0.8,
+            "max_new_tokens": 50
+        },
         "EM": metrics['EM'],
         "F1": metrics['F1'],
         "Avg_RAUQ": avg_rauq

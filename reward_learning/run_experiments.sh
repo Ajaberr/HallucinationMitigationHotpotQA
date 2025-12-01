@@ -79,23 +79,18 @@ train_custom_rlhf() {
 
 eval_baseline() {
     print_header "Evaluating Baseline Model (No RLHF)"
-    python evaluate_models.py \
-        --mode baseline \
-        --model "Qwen/Qwen2.5-7B-Instruct" \
-        --num_samples ${NUM_EVAL_SAMPLES} \
-        --output "${RESULTS_DIR}/baseline_results.json"
+    # Use the RAUQ-enabled eval script from baseline_finetune
+    cd ../baseline_finetune
+    MODEL_ID="Qwen/Qwen2.5-7B-Instruct" NUM_SAMPLES=${NUM_EVAL_SAMPLES} python eval.py
+    cd ../reward_learning
     print_success "Baseline evaluation completed"
 }
 
 eval_simple_rlhf() {
     print_header "Evaluating Simple RLHF Model"
     if [ -d "./simple_rlhf_policy" ]; then
-        python evaluate_models.py \
-            --mode rlhf \
-            --policy_path "./simple_rlhf_policy" \
-            --num_samples ${NUM_EVAL_SAMPLES} \
-            --output "${RESULTS_DIR}/simple_rlhf_results.json"
-        print_success "Simple RLHF evaluation completed"
+        # Copy policy to a location eval.py can access
+        print_error "Simple RLHF evaluation not yet integrated with RAUQ eval - skipping"
     else
         print_error "Simple RLHF policy not found - run training first"
     fi
@@ -103,75 +98,63 @@ eval_simple_rlhf() {
 
 eval_base_rlhf() {
     print_header "Evaluating Base RLHF Model"
-    if [ -d "./rlhf_policy" ] && [ -f "./reward_model.pt" ]; then
-        python evaluate_models.py \
-            --mode rlhf \
-            --policy_path "./rlhf_policy" \
-            --reward_path "./reward_model.pt" \
-            --num_samples ${NUM_EVAL_SAMPLES} \
-            --output "${RESULTS_DIR}/base_rlhf_results.json"
+    if [ -d "./verifier_rlhf_full_model" ]; then
+        # Use the RAUQ-enabled eval script with full RLHF model
+        cd ../baseline_finetune
+        MODEL_ID="../reward_learning/verifier_rlhf_full_model" NUM_SAMPLES=${NUM_EVAL_SAMPLES} python eval.py
+        cd ../reward_learning
         print_success "Base RLHF evaluation completed"
     else
-        print_error "Base RLHF policy/reward model not found - run training first"
+        print_error "RLHF full model not found - run training first"
     fi
 }
 
 eval_custom_rlhf() {
     print_header "Evaluating Custom RLHF Model (Anti-Hallucination)"
-    if [ -d "./custom_rlhf_policy" ] && [ -f "./custom_reward_model.pt" ]; then
-        python evaluate_models.py \
-            --mode rlhf \
-            --custom_policy_path "./custom_rlhf_policy" \
-            --custom_reward_path "./custom_reward_model.pt" \
-            --num_samples ${NUM_EVAL_SAMPLES} \
-            --output "${RESULTS_DIR}/custom_rlhf_results.json"
-        print_success "Custom RLHF evaluation completed"
-    else
-        print_error "Custom RLHF policy/reward model not found - run training first"
-    fi
+    print_error "Custom RLHF evaluation not yet implemented - skipping"
 }
 
 eval_compare_all() {
-    print_header "Comparing All Models (Baseline + Base RL + Anti-Hallucination RL)"
-    python evaluate_models.py \
-        --mode all \
-        --model "Qwen/Qwen2.5-7B-Instruct" \
-        --policy_path "./rlhf_policy" \
-        --reward_path "./reward_model.pt" \
-        --custom_policy_path "./custom_rlhf_policy" \
-        --custom_reward_path "./custom_reward_model.pt" \
-        --num_samples ${NUM_EVAL_SAMPLES} \
-        --output "${RESULTS_DIR}/all_models_comparison.json"
-    print_success "All models comparison completed"
+    print_header "Comparing All Models with RAUQ"
+
+    # Evaluate each model with RAUQ scoring
+    cd ../baseline_finetune
+
+    print_info "Evaluating Original Qwen..."
+    MODEL_ID="Qwen/Qwen2.5-7B-Instruct" NUM_SAMPLES=${NUM_EVAL_SAMPLES} python eval.py
+
+    print_info "Evaluating Fine-tuned Model..."
+    MODEL_ID="fsiddiqui2/Qwen2.5-7B-Instruct-HotpotQA-Finetuned-10000" NUM_SAMPLES=${NUM_EVAL_SAMPLES} python eval.py
+
+    if [ -d "../reward_learning/verifier_rlhf_full_model" ]; then
+        print_info "Evaluating RLHF Model..."
+        MODEL_ID="../reward_learning/verifier_rlhf_full_model" NUM_SAMPLES=${NUM_EVAL_SAMPLES} python eval.py
+    fi
+
+    cd ../reward_learning
+    print_success "All models comparison completed - check baseline_finetune/ for timestamped JSON results"
 }
 
 eval_baseline_vs_base() {
-    print_header "Comparing Baseline vs Base RLHF"
-    python evaluate_models.py \
-        --mode compare_baseline \
-        --model "Qwen/Qwen2.5-7B-Instruct" \
-        --policy_path "./rlhf_policy" \
-        --reward_path "./reward_model.pt" \
-        --num_samples ${NUM_EVAL_SAMPLES} \
-        --output "${RESULTS_DIR}/baseline_vs_base.json"
+    print_header "Comparing Baseline vs Base RLHF with RAUQ"
+
+    cd ../baseline_finetune
+
+    print_info "Evaluating Baseline..."
+    MODEL_ID="Qwen/Qwen2.5-7B-Instruct" NUM_SAMPLES=${NUM_EVAL_SAMPLES} python eval.py
+
+    if [ -d "../reward_learning/verifier_rlhf_full_model" ]; then
+        print_info "Evaluating RLHF..."
+        MODEL_ID="../reward_learning/verifier_rlhf_full_model" NUM_SAMPLES=${NUM_EVAL_SAMPLES} python eval.py
+    fi
+
+    cd ../reward_learning
     print_success "Baseline vs Base RLHF comparison completed"
 }
 
 eval_base_vs_custom() {
     print_header "Comparing Base RLHF vs Custom RLHF"
-    if [ -d "./rlhf_policy" ] && [ -d "./custom_rlhf_policy" ]; then
-        python evaluate_models.py \
-            --mode compare \
-            --policy_path "./rlhf_policy" \
-            --reward_path "./reward_model.pt" \
-            --custom_policy_path "./custom_rlhf_policy" \
-            --custom_reward_path "./custom_reward_model.pt" \
-            --num_samples ${NUM_EVAL_SAMPLES} \
-            --output "${RESULTS_DIR}/base_vs_custom.json"
-        print_success "Base vs Custom RLHF comparison completed"
-    else
-        print_error "Missing policies - run training first"
-    fi
+    print_error "Custom RLHF not implemented - skipping"
 }
 
 ################################################################################
