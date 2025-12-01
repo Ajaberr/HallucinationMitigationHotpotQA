@@ -577,15 +577,14 @@ class SimpleRLTrainer:
         # IMPORTANT: Set to eval mode for generation to avoid NaN with LoRA + quantization
         self.policy.eval()
         with torch.no_grad():
-            # Use sampling WITHOUT requesting scores/logits (avoids huge memory usage)
+            # Use greedy decoding during training for stability
             gen_ids = self.policy.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 max_new_tokens=self.config.max_new_tokens,
-                do_sample=True,              # Probabilistic decoding ON
-                top_p=0.9,                   # Nucleus sampling
-                temperature=0.8,             # Not too low, not too high
+                do_sample=False,             # Use greedy decoding during training
                 pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
                 return_dict_in_generate=False  # Returns sequences only, not dict
             )  # [B, T_total]
 
