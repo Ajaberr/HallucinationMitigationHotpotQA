@@ -253,9 +253,25 @@ def batch_iterator(iterable, size):
 # ==========================================
 
 if __name__ == "__main__":
-    TARGET_COUNT = 1000
+    TARGET_COUNT = 10000
     OUTPUT_FILE = f"hotpot_reasoning_{TARGET_COUNT}.jsonl"
     
+    # --- RESUME LOGIC START ---
+    processed_count = 0
+    if os.path.exists(OUTPUT_FILE):
+        print(f"🔍 Found existing file: {OUTPUT_FILE}. Counting progress...")
+        with open(OUTPUT_FILE, 'r', encoding='utf-8') as f:
+            for _ in f:
+                processed_count += 1
+        print(f"✅ Resuming from index {processed_count}")
+    else:
+        print("🆕 Starting fresh run.")
+    # --- RESUME LOGIC END ---
+
+    if processed_count >= TARGET_COUNT:
+        print("🎉 Target count already reached. Exiting.")
+        exit()
+
     # 1. Setup
     client, tokenizer = setup_tinker()
     
@@ -263,17 +279,19 @@ if __name__ == "__main__":
         print(f"💾 Loading HotpotQA (distractor, train)... Target: {TARGET_COUNT}")
         dataset = load_dataset("hotpot_qa", "distractor", split="train", streaming=True)
         
-        # Take the target count
-        iterable_data = dataset.take(TARGET_COUNT)
-        
-        completed_examples = []
+        # Skip what we've already done, then take the remainder
+        remaining_count = TARGET_COUNT - processed_count
+        iterable_data = dataset.skip(processed_count).take(remaining_count)
         
         print(f"🚀 Starting Batch Generation (Batch Size: {BATCH_SIZE})...")
 
+        # We don't need to keep a massive list in memory anymore, 
+        # we will append to file as we go.
+        
         for batch_idx, raw_batch in enumerate(batch_iterator(iterable_data, BATCH_SIZE)):
             print(f"\nProcessing Batch {batch_idx + 1}...")
             
-            # 1. Pre-process formatting for the whole batch
+            # 1. Pre-process formatting
             formatted_batch = []
             for raw_sample in raw_batch:
                 formatted_batch.append(process_hotpot_sample(raw_sample))
@@ -281,28 +299,25 @@ if __name__ == "__main__":
             # 2. Run concurrent generation
             batch_traces = process_batch(client, tokenizer, formatted_batch)
             
-            # 3. Merge results
-            success_count = 0
+            # 3. Save immediately (Append Mode)
+            current_batch_success = 0
+            new_lines = []
+            
             for raw_sample, trace in zip(raw_batch, batch_traces):
                 if trace:
                     output_obj = raw_sample.copy()
                     output_obj['reasoning_trace'] = trace
-                    completed_examples.append(output_obj)
-                    success_count += 1
+                    new_lines.append(json.dumps(output_obj))
+                    current_batch_success += 1
             
-            print(f"   Batch finished. Success: {success_count}/{len(raw_batch)}")
+            if new_lines:
+                # Open in 'a' (Append) mode so we don't overwrite previous progress
+                with open(OUTPUT_FILE, 'a', encoding='utf-8') as f:
+                    for line in new_lines:
+                        f.write(line + "\n")
             
-            # Periodic Save (every 5 batches)
-            if (batch_idx + 1) % 5 == 0:
-                print(f"   💾 Checkpoint saving ({len(completed_examples)} total)...")
-                with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
-                    for entry in completed_examples:
-                        f.write(json.dumps(entry) + "\n")
+            processed_count += len(raw_batch)
+            print(f"   Batch finished. Success: {current_batch_success}/{len(raw_batch)}")
+            print(f"   📈 Total Progress: {processed_count}/{TARGET_COUNT}")
 
-        # Final Save
-        print(f"\n💾 Final Save: {len(completed_examples)} examples to {OUTPUT_FILE}...")
-        with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
-            for entry in completed_examples:
-                f.write(json.dumps(entry) + "\n")
-                
         print("Done. Run 'upload_to_hf.py' to push to the Hub.")
