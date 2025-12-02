@@ -10,7 +10,7 @@ import json
 import os
 
 # --- Configuration ---
-MODEL_ID = "fsiddiqui2/Qwen2.5-7B-Instruct-HotpotQA-Finetuned-10000"
+MODEL_ID = "fsiddiqui2/Qwen2.5-7B-Instruct-HotpotQA-Finetuned-Distractor-10000"
 DATASET_NAME = "hotpot_qa"
 SUBSET_NAME = "distractor"
 SPLIT = "validation"
