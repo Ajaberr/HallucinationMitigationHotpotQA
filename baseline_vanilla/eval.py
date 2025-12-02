@@ -6,39 +6,39 @@ from tqdm import tqdm
 import re
 import string
 from collections import Counter
-import numpy as np
-import json # Added for JSON saving
+import json
+import os
 
 # --- Configuration ---
 MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
 DATASET_NAME = "hotpot_qa"
-SUBSET_NAME = "fullwiki"
+SUBSET_NAME = "distractor"
 SPLIT = "validation"
-NUM_SAMPLES = 1000
+NUM_SAMPLES = 1000 # Adjusted for testing
 RAUQ_ALPHA = 0.2
-# Output filenames
 DETAILED_OUTPUT_FILE = "detailed_results.json"
 FINAL_METRICS_FILE = "final_metrics.json"
 
 def load_model_and_tokenizer(model_id):
-    """Loads the model and tokenizer, optimizing for available hardware."""
     print(f"Loading model: {model_id}...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device {device}")
-
+    
+    # Qwen 2.5 handles Flash Attention 2 if available, but "eager" is safer for extracting attention weights
     kwargs = {
         "dtype": torch.bfloat16 if torch.cuda.is_available() and torch.cuda.get_device_properties(0).major >= 8 else torch.float16,
         "device_map": "auto",
         "low_cpu_mem_usage": True,
-        "attn_implementation": "eager"
+        "attn_implementation": "eager" # Mandatory for output_attentions=True stability
     }
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+        # Ensure pad token exists for batching/generation logic
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+            
         model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
-        
         model.eval()
-        print(f"Model loaded successfully on device: {device}")
         return tokenizer, model, device
     except Exception as e:
         print(f"Error loading model: {e}")
@@ -49,6 +49,7 @@ def get_rauq_score(sequences, scores, attentions, alpha=0.2):
     if len(scores) == 0:
         return 0.0
 
+    # Convert logits to probabilities
     probs = []
     for i, step_logits in enumerate(scores):
         step_probs = F.softmax(step_logits, dim=-1)
@@ -57,15 +58,27 @@ def get_rauq_score(sequences, scores, attentions, alpha=0.2):
         probs.append(token_prob)
     
     num_tokens = len(probs)
-    num_layers = len(attentions[0])
     
+    # SAFETY CHECK: RAUQ requires at least 2 tokens (current + previous)
+    # If answer is "Yes", only 1 token exists. No transition to analyze.
+    if num_tokens < 2:
+        return 0.0
+
+    num_layers = len(attentions[0])
     layer_uncertainties = []
 
     for layer_idx in range(num_layers):
         # --- Step 1: Head Selection ---
         prev_token_attns = []
+        
+        # We start at t=1 because t=0 has no "previous generated token" (only prompt)
         for t in range(1, num_tokens):
-            attn_map = attentions[t][layer_idx] # [1, H, 1, K]
+            # attentions shape: [step][layer][batch, heads, query_len, key_len]
+            # With caching, query_len=1. key_len grows.
+            # Index -1 is self (current token). Index -2 is immediately previous token.
+            attn_map = attentions[t][layer_idx] 
+            
+            # Extract attention to the previous token (index -2)
             attn_to_prev = attn_map[0, :, 0, -2]
             prev_token_attns.append(attn_to_prev)
             
@@ -79,12 +92,14 @@ def get_rauq_score(sequences, scores, attentions, alpha=0.2):
         
         # --- Step 2: Recurrent Confidence ---
         confidences = []
-        current_conf = probs[0]
+        current_conf = probs[0] # Initial confidence is just the prob of first token
         confidences.append(current_conf)
         
         for t in range(1, num_tokens):
             prob_curr = probs[t]
             attn_val = attentions[t][layer_idx][0, best_head_idx, 0, -2].item()
+            
+            # The RAUQ recursion
             current_conf = alpha * prob_curr + (1 - alpha) * attn_val * current_conf
             confidences.append(current_conf)
             
@@ -94,6 +109,10 @@ def get_rauq_score(sequences, scores, attentions, alpha=0.2):
         layer_uncertainties.append(layer_u)
 
     # --- Step 4: Final Score ---
+    # If generation was short/failed, handle empty list
+    if not layer_uncertainties:
+        return 0.0
+        
     final_rauq_score = max(layer_uncertainties)
     return final_rauq_score
 
@@ -126,7 +145,6 @@ def exact_match_score(prediction, ground_truth):
     return (normalize_answer(prediction) == normalize_answer(ground_truth))
 
 def compute_metrics(gold_answers, pred_answers):
-    """Aggregated metrics calculation"""
     em_total, f1_total = 0.0, 0.0
     for gold_list, pred in zip(gold_answers, pred_answers):
         best_em = max([float(exact_match_score(pred, gold)) for gold in gold_list])
@@ -143,13 +161,13 @@ def main():
     if model is None: return
 
     print(f"\nLoading HotpotQA dataset (split: {SPLIT}, samples: {NUM_SAMPLES})...")
-    dataset = load_dataset(DATASET_NAME, SUBSET_NAME, split=SPLIT).select(range(NUM_SAMPLES))
+    dataset = load_dataset(DATASET_NAME, SUBSET_NAME, split=SPLIT)
+    # Shuffle to get a variety of questions, then select
+    dataset = dataset.shuffle(seed=42).select(range(NUM_SAMPLES))
     
     gold_answers = []
     pred_answers = []
     rauq_scores = []
-    
-    # List to store individual sample details
     detailed_results = []
 
     print("\nStarting closed-book evaluation with RAUQ...")
@@ -159,11 +177,14 @@ def main():
         gold_answer_list = example['answer'] if isinstance(example['answer'], list) else [example['answer']]
         gold_answers.append(gold_answer_list)
 
-        prompt = f"""You are an expert at giving concise answers. Do not give any explanations, only a short answer.
-        Question: {question}
-        Answer: """
-
-        messages = [{"role": "user", "content": prompt}]
+        # --- IMPROVED PROMPT ---
+        # Using system role for constraint and User role for question.
+        # This prevents "Answer: Answer: " repetitions.
+        messages = [
+            {"role": "system", "content": "You are a concise encyclopedia. Answer the question directly with a short phrase or entity name. Do not explain."},
+            {"role": "user", "content": question}
+        ]
+        
         text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = tokenizer(text, return_tensors="pt", truncation=True).to(device)
 
@@ -171,9 +192,9 @@ def main():
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=50,
-                do_sample=False,
+                do_sample=False, # Greedy decoding preferred for RAUQ baselines
                 num_beams=1,
-                pad_token_id=tokenizer.eos_token_id,
+                pad_token_id=tokenizer.pad_token_id,
                 output_attentions=True,
                 output_scores=True,
                 return_dict_in_generate=True
@@ -193,19 +214,23 @@ def main():
         )
         rauq_scores.append(rauq)
         
-        # --- Calculate Individual Metrics for this sample ---
-        # We take the max score across possible valid answers (HotpotQA format)
+        # Cleanup VRAM - Critical for output_attentions
+        del outputs
+        # Only empty cache occasionally to save speed, or every time if OOM occurs
+        if i % 10 == 0: 
+            torch.cuda.empty_cache()
+
+        # Metrics for this sample
         sample_em = max([float(exact_match_score(generated_text, gold)) for gold in gold_answer_list])
         sample_f1 = max([f1_score(generated_text, gold)[0] for gold in gold_answer_list])
 
-        # Prepare data entry
         result_entry = {
             "id": i,
             "question": question,
             "gold_answers": gold_answer_list,
             "prediction": generated_text,
             "metrics": {
-                "rauq_score": float(rauq), # cast to native float for JSON serialization
+                "rauq_score": float(rauq),
                 "exact_match": sample_em,
                 "f1_score": sample_f1
             }
@@ -213,19 +238,22 @@ def main():
         detailed_results.append(result_entry)
 
         if i % (NUM_SAMPLES // 5 or 1) == 0 and i > 0:
-            print(f"\nSample {i}: {question} -> {generated_text} | RAUQ: {rauq:.4f}")
+            print(f"\nSample {i}: {question[:50]}... -> {generated_text} | RAUQ: {rauq:.4f}")
 
     # --- Final Computations ---
     metrics = compute_metrics(gold_answers, pred_answers)
-    avg_rauq = sum(rauq_scores) / len(rauq_scores)
+    avg_rauq = sum(rauq_scores) / len(rauq_scores) if rauq_scores else 0.0
 
     final_results = {
         "model": MODEL_ID,
         "dataset": DATASET_NAME,
+        "setting": SUBSET_NAME,
+        "split": SPLIT,
         "samples": NUM_SAMPLES,
         "EM": metrics['EM'],
         "F1": metrics['F1'],
-        "Avg_RAUQ": avg_rauq
+        "Avg_RAUQ": avg_rauq,
+        "RAUQ_alpha": RAUQ_ALPHA
     }
 
     print(f"\nResults for {MODEL_ID} on HotpotQA:")
@@ -233,7 +261,6 @@ def main():
     print(f"  F1 Score (F1): {metrics['F1']:.2f}%")
     print(f"  Avg RAUQ Uncertainty: {avg_rauq:.4f}")
 
-    # --- Save Results to JSON ---
     print(f"Saving detailed results to {DETAILED_OUTPUT_FILE}...")
     with open(DETAILED_OUTPUT_FILE, 'w', encoding='utf-8') as f:
         json.dump(detailed_results, f, indent=2, ensure_ascii=False)

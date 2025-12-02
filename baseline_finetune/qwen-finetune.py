@@ -13,72 +13,71 @@ import huggingface_hub
 from transformers.trainer_utils import get_last_checkpoint
 
 # --- Configuration ---
-# 1. Login to Hugging Face (Required to push the model)
-# You can also run `huggingface-cli login` in terminal beforehand
-# huggingface_hub.login(token="YOUR_HF_TOKEN_HERE") 
-
 MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
-HF_USERNAME = "fsiddiqui2" 
+# HF_USERNAME = "fsiddiqui2"  # Add if pushing
 DATASET_NAME = "hotpot_qa"
-SUBSET_NAME = "fullwiki"
+SUBSET_NAME = "distractor"
 SPLIT = "train"
 NUM_SAMPLES = 10000
 OUTPUT_DIR="./qwen_hotpot_finetuned"
 
-# Using the prompt format from your EVAL code
-PROMPT_PREFIX = """You are an expert at giving concise answers. Do not give any explanations, only a short answer.
-        Question: """
-PROMPT_SUFFIX = """
-        Answer: """
-
 # --- 1. Load Tokenizer & Dataset ---
 print(f"Loading tokenizer for {MODEL_ID}...")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
-tokenizer.padding_side = "right" # Important for training
+tokenizer.padding_side = "right" 
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 
 print(f"Loading {DATASET_NAME} dataset...")
 dataset = load_dataset(DATASET_NAME, SUBSET_NAME, split=SPLIT).select(range(NUM_SAMPLES))
 
-# --- 2. Pre-Tokenization Logic (Adapted from Reference) ---
+# --- 2. Corrected Pre-Tokenization Logic ---
 MAX_LEN = 512 
+
+# MATCHING THE EVAL SCRIPT SYSTEM PROMPT EXACTLY
+SYSTEM_PROMPT = "You are a concise encyclopedia. Answer the question directly with a short phrase or entity name. Do not explain."
 
 def tokenize_batch(batch):
     """
-    Tokenizes the input (Prompt) and Output (Answer) separately to allow
-    masking the prompt during loss calculation.
+    Tokenizes using the Chat Template to ensure Training matches Eval.
     """
-    # 1. Construct the full prompt text (System instruction + Question + "Answer:")
-    prompts = [f"{PROMPT_PREFIX}{q}{PROMPT_SUFFIX}" for q in batch["question"]]
-    
-    # 2. Tokenize prompt (no padding yet)
-    enc_prompts = tokenizer(prompts, padding=False, add_special_tokens=False)
-    
-    # 3. Tokenize answers (target)
-    # HotpotQA answers are strings in the 'answer' column
-    answers = [str(a).strip() for a in batch["answer"]]
-    enc_answers = tokenizer(answers, padding=False, add_special_tokens=False)
-
     input_ids_list = []
     prompt_len_list = []
-
-    for prompt_ids, answer_ids in zip(enc_prompts["input_ids"], enc_answers["input_ids"]):
-        # Concatenate: Prompt + Answer + EOS
-        combined_ids = prompt_ids + answer_ids + [tokenizer.eos_token_id]
+    
+    # Iterate over the batch
+    for question, answer in zip(batch["question"], batch["answer"]):
+        # 1. Format the PROMPT (Input) using the Chat Template
+        # This matches what you do in the Eval script
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": question}
+        ]
         
-        # Truncate if necessary (keep prompt, truncate answer if needed, or cut from left)
-        if len(combined_ids) > MAX_LEN:
-            combined_ids = combined_ids[:MAX_LEN]
-            
-        input_ids_list.append(combined_ids)
-        # Record length of prompt so we can mask it later
+        # Generate the prompt text with special tokens (e.g. <|im_start|>user...)
+        # add_generation_prompt=True ensures it ends with <|im_start|>assistant
+        prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        
+        # 2. Format the FULL training sequence (Prompt + Answer)
+        # We append the answer and the EOS token manually or via template
+        full_text = prompt_text + str(answer).strip() + tokenizer.eos_token
+        
+        # 3. Tokenize
+        prompt_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
+        full_ids = tokenizer(full_text, add_special_tokens=False)["input_ids"]
+        
+        # 4. Length Handling
+        if len(full_ids) > MAX_LEN:
+            full_ids = full_ids[:MAX_LEN]
+        
+        input_ids_list.append(full_ids)
+        
+        # We save the length of the prompt so we can mask it in the collator
+        # (We only want to calculate loss on the answer, not the system prompt/question)
         prompt_len_list.append(len(prompt_ids))
 
     return {
         "input_ids": input_ids_list,
         "prompt_len": prompt_len_list,
-        # We don't strictly need attention_mask here as the Collator builds it
     }
 
 print("Tokenizing dataset...")
@@ -90,7 +89,7 @@ tokenized_dataset = dataset.map(
     desc="Running tokenizer"
 )
 
-# --- 3. Collator (From Reference) ---
+# --- 3. Collator (Unchanged, this works great) ---
 class PromptMaskedCollator:
     def __init__(self, tokenizer, pad_to_multiple_of=8):
         self.tok = tokenizer
@@ -100,7 +99,6 @@ class PromptMaskedCollator:
         prompt_len = torch.tensor([f["prompt_len"] for f in features], dtype=torch.long)
         feats_to_pad = [{"input_ids": f["input_ids"]} for f in features]
 
-        # Pad the input_ids
         batch = self.tok.pad(
             feats_to_pad,
             padding=True,
@@ -110,19 +108,13 @@ class PromptMaskedCollator:
 
         input_ids = batch["input_ids"]
         attn = batch["attention_mask"]
-
-        # create labels (clone input_ids)
         labels = input_ids.clone()
         
-        # Create a range matrix to compare against prompt_len
         T = input_ids.size(1)
         ar = torch.arange(T, device=input_ids.device).unsqueeze(0)
         plen = prompt_len.unsqueeze(1).to(device=input_ids.device)
 
-        # MASKING LOGIC:
-        # 1. Mask the prompt (set to -100)
         labels[ar < plen] = -100
-        # 2. Mask the padding (set to -100)
         labels[attn == 0] = -100
 
         batch["labels"] = labels
@@ -143,10 +135,9 @@ model = AutoModelForCausalLM.from_pretrained(
     quantization_config=bnb_config,
     device_map="auto",
     trust_remote_code=True,
+    # Qwen 2.5 supports flash_attention_2 if your GPU allows, otherwise sdpa/eager
     attn_implementation="sdpa" if torch.cuda.is_available() else "eager"
 )
-
-print(f"Device: {model.device}")
 
 # Prepare LoRA configuration
 lora_config = LoraConfig(
@@ -164,18 +155,17 @@ model.print_trainable_parameters()
 # --- 5. Training Setup ---
 training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
-    num_train_epochs=1,                     # Kept low for speed, increase for better results
-    per_device_train_batch_size=4,          # Adjust based on VRAM
+    num_train_epochs=1,                     
+    per_device_train_batch_size=4,          
     gradient_accumulation_steps=4,
     learning_rate=2e-4,
     lr_scheduler_type="cosine",
     warmup_ratio=0.03,
     logging_steps=10,
-    save_strategy="steps",      # Save frequently (not just at end of epoch)
-    save_steps=50,              # Save every 50 steps (adjust based on speed)
-    save_total_limit=2,         # Only keep the last 2 checkpoints to save disk space
-
-    fp16=True,                              # Use fp16 (or bf16 if Ampere GPU)
+    save_strategy="steps",      
+    save_steps=100,              
+    save_total_limit=2,         
+    fp16=True,                              
     optim="adamw_torch",
     report_to="none",
     group_by_length=True,
@@ -191,8 +181,6 @@ trainer = Trainer(
 
 # --- 6. Train & Save ---
 print("Checking for existing checkpoints...")
-
-# Check if a checkpoint exists in the output directory
 last_checkpoint = get_last_checkpoint(OUTPUT_DIR)
 
 if last_checkpoint:
