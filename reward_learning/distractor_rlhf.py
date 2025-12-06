@@ -1,7 +1,12 @@
 """
-Verifier-Based Reward Learning RLHF (Qwen2-7B)
+Verifier-Based Reward Learning RLHF with DISTRACTOR setting (Qwen2-7B)
 
-This module implements reward learning RLHF using factuality verification:
+DISTRACTOR SETTING:
+- Policy receives: Question + ALL context paragraphs (including distractors)
+- Verifier receives: Question + ONLY supporting facts (correct context subset)
+
+This makes the task harder for the policy (must filter distractors) while
+the verifier can properly assess factuality against ground truth context.
 
 REWARD FUNCTION:
 - Factuality Score: f = p_ent - p_cont ∈ [-1, 1] from NLI verifier
@@ -12,7 +17,6 @@ REINFORCEMENT LEARNING (REINFORCE):
 - Sample responses from policy: ŷ ~ π_θ(·|x)
 - Compute reward: R(x, ŷ) using verifier + confidence
 - Optimize: E[-(R(x, ŷ) - b) log π_θ(ŷ|x)] where b is baseline (mean reward)
-- This is reward-weighted log-likelihood (REINFORCE algorithm)
 
 Components:
 - FactualityVerifier: NLI-based verifier (DeBERTa-FEVER) for computing f = p_ent - p_cont
@@ -20,8 +24,6 @@ Components:
 - RewardFunction: Combines factuality + confidence into scalar reward
 - REINFORCELoss: Policy gradient loss with baseline
 - SimpleRLTrainer: REINFORCE training using verifier-based rewards
-
-Reference: This uses reward learning (not DPO) with verifier-based factuality signals.
 """
 
 import torch
@@ -38,7 +40,6 @@ from collections import Counter
 import signal
 import sys
 import os
-import json
 
 # Import reward components from reward_and_loss.py
 from reward_and_loss import (
@@ -360,7 +361,7 @@ class RewardModelTrainer:
 
 
 ################################################################################
-# PHASE B: Simple Reward Learning (REINFORCE)
+# PHASE B: Simple Reward Learning (REINFORCE) with DISTRACTOR setting
 ################################################################################
 
 @dataclass
@@ -370,11 +371,11 @@ class SimpleRLConfig:
     learning_rate: float = 1e-5
     batch_size: int = 2
     num_epochs: int = 1
-    max_length: int = 512
+    max_length: int = 2048  # Increased for distractor context
     max_new_tokens: int = 64
     temperature: float = 1.0
     top_p: float = 0.9
-    kl_penalty: float = 0.1  # KL divergence penalty coefficient (0.0 = no penalty, 0.01-0.1 = recommended)
+    kl_penalty: float = 0.1  # KL divergence penalty coefficient
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -394,11 +395,7 @@ class PromptDataset(Dataset):
 class SimpleRLTrainer:
     """
     Simple reward learning using REINFORCE with verifier-based rewards.
-
-    This trainer optimizes a policy π_θ(y|x) using rewards from a verifier-based
-    reward function R(x,y) = f * (λ_base + λ_conf * conf).
-    The REINFORCE algorithm samples responses and uses reward-weighted log-likelihoods
-    to update the policy.
+    DISTRACTOR SETTING: Policy sees all context, verifier sees only supporting facts.
     """
 
     def __init__(self, config: SimpleRLConfig, reward_model: RewardModel = None):
@@ -413,15 +410,15 @@ class SimpleRLTrainer:
         # IMPORTANT: Decoder-only models require left-padding for generation
         self.tokenizer.padding_side = 'left'
 
-        # Load model with 4-bit quantization + LoRA (matching qwen-finetune.py approach)
+        # Load model with 4-bit quantization + LoRA
         from transformers import BitsAndBytesConfig
         from peft import LoraConfig, get_peft_model, AutoPeftModelForCausalLM
         import os
 
-        # Check if this is a saved LoRA checkpoint (has adapter_config.json)
+        # Check if this is a saved LoRA checkpoint
         is_lora_checkpoint = os.path.exists(os.path.join(config.policy_model_name, "adapter_config.json"))
 
-        # Quantization config (matching qwen-finetune.py)
+        # Quantization config
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
@@ -429,24 +426,21 @@ class SimpleRLTrainer:
         )
 
         if is_lora_checkpoint:
-            # Load saved LoRA adapters from checkpoint
             print(f"Loading LoRA checkpoint from {config.policy_model_name}...")
             self.policy = AutoPeftModelForCausalLM.from_pretrained(
                 config.policy_model_name,
                 device_map="auto",
                 quantization_config=bnb_config,
-                is_trainable=True  # Ensure model is trainable
+                is_trainable=True
             )
             print("LoRA checkpoint loaded successfully!")
 
-            # Ensure model is in training mode with gradients enabled
             self.policy.train()
             for name, param in self.policy.named_parameters():
                 if "lora" in name.lower():
                     param.requires_grad = True
 
         else:
-            # Load base model and add new LoRA adapters (matching qwen-finetune.py)
             print(f"Loading base model {config.policy_model_name} with LoRA adapters...")
             self.policy = AutoModelForCausalLM.from_pretrained(
                 config.policy_model_name,
@@ -456,7 +450,6 @@ class SimpleRLTrainer:
                 attn_implementation="sdpa" if torch.cuda.is_available() else "eager"
             )
 
-            # Prepare LoRA configuration (matching qwen-finetune.py)
             lora_config = LoraConfig(
                 r=16,
                 lora_alpha=32,
@@ -466,72 +459,55 @@ class SimpleRLTrainer:
                 target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
             )
 
-            # Add LoRA adapters to the quantized model
             self.policy = get_peft_model(self.policy, lora_config)
-
-            # Print trainable parameters
             self.policy.print_trainable_parameters()
 
-        # Verifier-based reward model (optional for evaluation-only mode)
+        # Verifier-based reward model
         self.reward_model = None
         self.abstention_classifier = None
         if reward_model is not None:
             self.reward_model = reward_model.to(self.device)
             self.reward_model.eval()
-            # Set vocab size for entropy calculation
             self.reward_model.set_vocab_size(self.tokenizer.vocab_size)
             # Initialize abstention classifier
             self.abstention_classifier = AbstentionClassifier(self.reward_model.verifier)
 
-        # Store reference policy for KL divergence (frozen copy of initial policy)
-        # Only create if training (reward_model is not None) and KL penalty > 0
+        # Store reference policy for KL divergence
         self.ref_policy = None
         if reward_model is not None and config.kl_penalty > 0.0:
             print(f"Creating reference policy for KL divergence penalty (β={config.kl_penalty})...")
-            # For LoRA models: reference is the base model (before adapter training)
-            # We keep the initial state by cloning the model at initialization
-            if is_lora_checkpoint:
-                # If loading from checkpoint, reference should be the base model
-                print("WARNING: Loading from LoRA checkpoint - reference policy will also include checkpoint adapters")
-                print("For true KL penalty against base model, train from scratch (not from checkpoint)")
-
             from copy import deepcopy
             self.ref_policy = deepcopy(self.policy)
 
-            # Freeze all parameters
             for param in self.ref_policy.parameters():
                 param.requires_grad = False
             self.ref_policy.eval()
-            print(f"Reference policy created and frozen (memory: ~{torch.cuda.max_memory_allocated() / 1e9:.2f}GB)")
+            print(f"Reference policy created and frozen")
 
-            # Warning about memory usage
-            if torch.cuda.is_available():
-                print(f"NOTE: Reference policy uses extra GPU memory. Consider lower kl_penalty if OOM occurs.")
-
-        # REINFORCE loss function (only needed for training)
+        # REINFORCE loss function
         self.loss_fn = REINFORCELoss(
             baseline_type="batch_mean",
             kl_penalty=config.kl_penalty
         ) if reward_model is not None else None
 
-        # Optimizer for policy (only needed for training)
+        # Optimizer for policy
         self.optimizer = torch.optim.AdamW(
             self.policy.parameters(),
             lr=config.learning_rate
         ) if reward_model is not None else None
 
         # Checkpoint management
-        self.checkpoint_dir = "checkpoints"
+        self.checkpoint_dir = "checkpoints_distractor"
         self.current_step = 0
         self.current_epoch = 0
         self.should_exit = False
 
-        # Register signal handlers for graceful shutdown with checkpoint saving
+        # Register signal handlers
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
 
     def _signal_handler(self, signum, _):
-        """Handle SIGTERM and SIGINT by saving checkpoint and exiting gracefully"""
+        """Handle SIGTERM and SIGINT by saving checkpoint"""
         print(f"\n{'='*70}")
         print(f"Received signal {signum} - saving checkpoint before exit...")
         print(f"{'='*70}")
@@ -541,7 +517,7 @@ class SimpleRLTrainer:
         sys.exit(0)
 
     def save_checkpoint(self, checkpoint_name: str = None):
-        """Save training checkpoint including model state and training progress"""
+        """Save training checkpoint"""
         if checkpoint_name is None:
             checkpoint_name = f"checkpoint_epoch_{self.current_epoch}_step_{self.current_step}"
 
@@ -550,7 +526,7 @@ class SimpleRLTrainer:
 
         print(f"\nSaving checkpoint to {checkpoint_path}...")
 
-        # Save LoRA adapters (policy)
+        # Save LoRA adapters
         self.policy.save_pretrained(checkpoint_path)
         self.tokenizer.save_pretrained(checkpoint_path)
 
@@ -572,60 +548,42 @@ class SimpleRLTrainer:
         attention_mask: torch.Tensor,
         prompt_len: int
     ) -> torch.Tensor:
-        """
-        Compute log π_θ(y | x) for the response tokens only.
-
-        Args:
-            input_ids: [batch_size, seq_len] (prompt + response)
-            attention_mask: [batch_size, seq_len]
-            prompt_len: Length of the prompt (excluding response)
-
-        Returns:
-            log_probs: [batch_size] sum of log probabilities for response tokens
-        """
-        # Get model predictions
+        """Compute log π_θ(y | x) for the response tokens only."""
         outputs = self.policy(input_ids=input_ids, attention_mask=attention_mask)
-        logits = outputs.logits[:, :-1, :]  # [B, T-1, V] - predict next token
+        logits = outputs.logits[:, :-1, :]
 
-        # NUMERICAL SAFETY: clamp logits to avoid NaN in softmax
+        # NUMERICAL SAFETY
         logits = torch.clamp(logits, -50, 50)
+        log_probs = torch.log_softmax(logits, dim=-1)
 
-        # Convert to log probabilities
-        log_probs = torch.log_softmax(logits, dim=-1)  # [B, T-1, V]
+        next_ids = input_ids[:, 1:]
+        token_logprobs = log_probs.gather(-1, next_ids.unsqueeze(-1)).squeeze(-1)
 
-        # Get the actual next tokens
-        next_ids = input_ids[:, 1:]  # [B, T-1]
-
-        # Gather log probs of actual tokens
-        token_logprobs = log_probs.gather(-1, next_ids.unsqueeze(-1)).squeeze(-1)  # [B, T-1]
-
-        # Mask to only keep response tokens (positions >= prompt_len)
+        # Mask to only keep response tokens
         mask = torch.zeros_like(token_logprobs)
-        mask[:, prompt_len-1:] = 1.0  # Only response tokens
+        mask[:, prompt_len-1:] = 1.0
 
-        # Sum log probs over response tokens
-        response_logprobs = (token_logprobs * mask).sum(dim=1)  # [B]
-
+        response_logprobs = (token_logprobs * mask).sum(dim=1)
         return response_logprobs
 
     def train_step(self, batch_data: List[Tuple[str, str, str]]) -> Tuple[float, float, float, Dict[str, float]]:
         """
-        Single REINFORCE training step with verifier-based rewards
+        Single REINFORCE training step with distractor setting.
 
         Args:
-            batch_data: List of (prompt, gold_answer, evidence) tuples
+            batch_data: List of (prompt_with_all_context, gold_answer, supporting_evidence_only) tuples
 
         Returns:
             Tuple of (loss, mean_reward, mean_logprob, extra_metrics)
         """
         # Unpack batch
-        prompts = [p for p, _, _ in batch_data]
+        prompts_with_distractors = [p for p, _, _ in batch_data]  # Policy sees ALL context
         gold_answers = [a for _, a, _ in batch_data]
-        evidences = [e for _, _, e in batch_data]
+        supporting_evidences = [e for _, _, e in batch_data]  # Verifier sees ONLY supporting facts
 
-        # 1) Encode prompts (questions)
+        # 1) Encode prompts with distractors
         encoded = self.tokenizer(
-            prompts,
+            prompts_with_distractors,
             padding=True,
             truncation=True,
             max_length=self.config.max_length,
@@ -635,32 +593,26 @@ class SimpleRLTrainer:
         attention_mask = encoded["attention_mask"].to(self.device)
         prompt_len = input_ids.size(1)
 
-        # 2) Sample responses from policy π_θ(y|x) - sequence-only generation (memory-safe)
-        # IMPORTANT: Set to eval mode for generation to avoid NaN with LoRA + quantization
+        # 2) Sample responses from policy
         self.policy.eval()
         with torch.no_grad():
-            # Use greedy decoding during training for stability
             gen_ids = self.policy.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 max_new_tokens=self.config.max_new_tokens,
-                do_sample=False,             # Use greedy decoding during training
+                do_sample=False,
                 pad_token_id=self.tokenizer.pad_token_id,
                 eos_token_id=self.tokenizer.eos_token_id,
-                return_dict_in_generate=False  # Returns sequences only, not dict
-            )  # [B, T_total]
+                return_dict_in_generate=False
+            )
 
-        # Extract only generated part
-        generated_sequences = gen_ids[:, prompt_len:]  # [B, T_gen]
-
-        # Decode generated answers
+        generated_sequences = gen_ids[:, prompt_len:]
         generated_answers = self.tokenizer.batch_decode(
             generated_sequences,
             skip_special_tokens=True
         )
 
-        # 3) Recompute logits safely via separate forward pass (NUMERICAL SAFETY)
-        # This is needed for: (a) REINFORCE log_probs, (b) entropy-based confidence
+        # 3) Recompute logits
         gen_attention = (gen_ids != self.tokenizer.pad_token_id).long()
 
         with torch.no_grad():
@@ -668,40 +620,32 @@ class SimpleRLTrainer:
                 input_ids=gen_ids,
                 attention_mask=gen_attention
             )
-            logits = outputs.logits[:, :-1, :]  # [B, T_total-1, V] - predict next token
-
-            # NUMERICAL SAFETY: clamp logits to avoid NaN in softmax
+            logits = outputs.logits[:, :-1, :]
             logits = torch.clamp(logits, -50, 50)
+            log_probs_all = torch.log_softmax(logits, dim=-1)
 
-            # Compute log probabilities for all positions (stable)
-            log_probs_all = torch.log_softmax(logits, dim=-1)  # [B, T_total-1, V]
-
-        # 4) Compute entropy-based confidence from recomputed logits (response tokens only)
+        # 4) Compute entropy-based confidence
         import math
         with torch.no_grad():
-            # Compute probabilities and entropy per token
-            probs = log_probs_all.exp()  # [B, T_total-1, V]
-            entropy = -(probs * log_probs_all).sum(dim=-1)  # [B, T_total-1]
+            probs = log_probs_all.exp()
+            entropy = -(probs * log_probs_all).sum(dim=-1)
 
-            # Mask: only response positions (>= prompt_len-1 due to shift)
             resp_mask = torch.zeros_like(entropy)
             resp_mask[:, prompt_len-1:] = 1.0
 
-            # Average entropy over response tokens
             sum_entropy = (entropy * resp_mask).sum(dim=1)
             num_resp_tokens = resp_mask.sum(dim=1).clamp(min=1)
-            avg_entropy = sum_entropy / num_resp_tokens  # [B]
+            avg_entropy = sum_entropy / num_resp_tokens
 
-            # Normalize by log(vocab_size) and compute confidence
             max_entropy = math.log(self.tokenizer.vocab_size)
             conf = 1.0 - (avg_entropy / max_entropy)
             conf = torch.clamp(conf, 0.0, 1.0)
-            conf = torch.nan_to_num(conf, nan=0.0)  # Safety for NaNs
+            conf = torch.nan_to_num(conf, nan=0.0)
 
-        # 5) Compute factuality scores using verifier (no logits needed)
+        # 5) Compute factuality using SUPPORTING EVIDENCE ONLY (not distractors!)
         with torch.no_grad():
             p_ent, p_cont, f = self.reward_model.verifier.compute_factuality_score(
-                evidences=evidences,  # Use HotpotQA context as evidence/premise
+                evidences=supporting_evidences,  # ← Only supporting facts!
                 answers=generated_answers
             )
 
@@ -709,13 +653,6 @@ class SimpleRLTrainer:
             abstention_scores = self.abstention_classifier.predict_proba(generated_answers).to(f.device)
             abstention_threshold = 0.5
             abstained = (abstention_scores >= abstention_threshold)  # bool [B]
-
-            # DEBUG: Print sample answers and their abstention scores every 100 steps
-            if self.current_step % 100 == 0:
-                print(f"\n[DEBUG] Sample answers at step {self.current_step}:")
-                for i, (answer, score, is_abstain) in enumerate(zip(generated_answers[:2], abstention_scores[:2], abstained[:2])):
-                    print(f"  Answer {i}: '{answer}'")
-                    print(f"    Abstention score: {score.item():.4f}, Classified as abstention: {is_abstain.item()}")
 
             # --- BASE REWARD: factuality * (λ_base + λ_conf * conf) ---
             lambda_base = self.reward_model.lambda_base
@@ -743,7 +680,6 @@ class SimpleRLTrainer:
             )
 
             # REWARD NORMALIZATION: Normalize to mean=0, std=1 for variance reduction
-            rewards_before_norm = rewards.clone()  # Save for logging
             rewards_mean = rewards.mean()
             rewards_std = rewards.std()
             if rewards_std > 1e-8:  # Avoid division by zero
@@ -762,40 +698,31 @@ class SimpleRLTrainer:
             original_reward_std = rewards_std.item()
             abstention_rate = abstained.float().mean().item()
 
-        # Clear CUDA cache to free memory before gradient-requiring forward pass
         torch.cuda.empty_cache()
 
-        # 6) Compute log π_θ(ŷ | x) for sampled responses (REINFORCE)
-        # Need to re-run forward pass for gradients - set back to train mode
+        # 6) Compute log π_θ(ŷ | x) for REINFORCE
         self.policy.train()
         gen_attention = (gen_ids != self.tokenizer.pad_token_id).long()
-        log_probs = self.compute_logprobs(gen_ids, gen_attention, prompt_len)  # [B]
+        log_probs = self.compute_logprobs(gen_ids, gen_attention, prompt_len)
 
-        # 6b) Compute reference log probs for KL divergence penalty (if enabled)
+        # 6b) Compute reference log probs for KL penalty
         ref_log_probs = None
         if self.ref_policy is not None:
             with torch.no_grad():
-                # Compute log probs using frozen reference policy
                 ref_outputs = self.ref_policy(input_ids=gen_ids, attention_mask=gen_attention)
-                ref_logits = ref_outputs.logits[:, :-1, :]  # [B, T-1, V]
-
-                # NUMERICAL SAFETY: clamp logits to avoid NaN
+                ref_logits = ref_outputs.logits[:, :-1, :]
                 ref_logits = torch.clamp(ref_logits, -50, 50)
+                ref_log_probs_all = torch.log_softmax(ref_logits, dim=-1)
 
-                ref_log_probs_all = torch.log_softmax(ref_logits, dim=-1)  # [B, T-1, V]
+                next_ids = gen_ids[:, 1:]
+                ref_token_logprobs = ref_log_probs_all.gather(-1, next_ids.unsqueeze(-1)).squeeze(-1)
 
-                # Get log probs for actual tokens
-                next_ids = gen_ids[:, 1:]  # [B, T-1]
-                ref_token_logprobs = ref_log_probs_all.gather(-1, next_ids.unsqueeze(-1)).squeeze(-1)  # [B, T-1]
-
-                # Mask to only keep response tokens
                 mask = torch.zeros_like(ref_token_logprobs)
                 mask[:, prompt_len-1:] = 1.0
 
-                # Sum log probs over response tokens
-                ref_log_probs = (ref_token_logprobs * mask).sum(dim=1)  # [B]
+                ref_log_probs = (ref_token_logprobs * mask).sum(dim=1)
 
-        # 7) REINFORCE loss with baseline and KL penalty
+        # 7) REINFORCE loss with KL penalty
         loss, loss_metrics = self.loss_fn.compute_loss(rewards, log_probs, ref_log_probs)
 
         # Backward pass
@@ -810,51 +737,28 @@ class SimpleRLTrainer:
             "abstention_rate": abstention_rate,            # % of answers that are abstentions
             "original_reward_mean": original_reward_mean,  # Before normalization
             "original_reward_std": original_reward_std,    # Before normalization
-            "normalized_reward_mean": rewards.mean().item(),  # After normalization (should be ~0)
+            "normalized_reward_mean": rewards.mean().item(),  # After normalization
             **loss_metrics
         }
-
-        # Save prediction details for analysis
-        prediction_details = []
-        for i in range(len(generated_answers)):
-            prediction_details.append({
-                "question": questions[i],
-                "generated_answer": generated_answers[i],
-                "gold_answer": gold_answers[i],
-                "abstention_score": abstention_scores[i].item(),
-                "is_abstention": abstained[i].item(),
-                "factuality_score": f[i].item(),
-                "confidence": conf[i].item(),
-                "reward_before_norm": rewards_before_norm[i].item(),
-                "reward_after_norm": rewards[i].item()
-            })
-        extra_metrics["predictions"] = prediction_details
 
         return loss.item(), original_reward_mean, log_probs.mean().item(), extra_metrics
 
     def train(self, training_data: List[Tuple[str, str, str]]) -> Dict[str, List[float]]:
-        """
-        Train the policy using REINFORCE with verifier-based rewards
-
-        Args:
-            training_data: List of (prompt, gold_answer, evidence) tuples for training
-
-        Returns:
-            Dictionary with training metrics
-        """
+        """Train the policy using REINFORCE with distractor setting"""
         losses = []
         rewards = []
         factuality_scores = []
         confidence_scores = []
 
         print("\n" + "="*70)
-        print("REINFORCE Policy Training with Verifier-Based Rewards")
+        print("REINFORCE Training with DISTRACTOR SETTING")
         print("="*70)
-        print(f"Checkpoints will be saved every 1000 steps to {self.checkpoint_dir}/")
-        print(f"Use Ctrl+C or kill signal to save checkpoint and exit gracefully")
+        print(f"Policy: Sees ALL context (including distractors)")
+        print(f"Verifier: Sees ONLY supporting facts")
+        print(f"Checkpoints: {self.checkpoint_dir}/ every 1000 steps")
         print("="*70)
 
-        checkpoint_interval = 1000  # Save checkpoint every 1000 steps
+        checkpoint_interval = 1000
 
         for epoch in range(self.config.num_epochs):
             self.current_epoch = epoch
@@ -863,25 +767,20 @@ class SimpleRLTrainer:
             epoch_factuality = []
             epoch_confidence = []
 
-            # Manual batching instead of DataLoader (which doesn't handle string tuples well)
             import random
             indices = list(range(len(training_data)))
-            # Use fixed seed for reproducibility when resuming
             random.seed(42 + epoch)
             random.shuffle(indices)
 
-            # Resume from checkpoint step if available
             start_step = self.current_step if self.current_step > 0 else 0
             if start_step > 0:
                 print(f"Resuming from step {start_step}...")
 
             for step in range(start_step, len(training_data), self.config.batch_size):
-                # Check if we should exit gracefully
                 if self.should_exit:
                     print("Graceful shutdown requested. Exiting training loop...")
                     break
 
-                # Get batch indices
                 batch_indices = indices[step:step + self.config.batch_size]
                 batch = [training_data[i] for i in batch_indices]
 
@@ -892,7 +791,6 @@ class SimpleRLTrainer:
                 epoch_factuality.append(extra_metrics["mean_factuality"])
                 epoch_confidence.append(extra_metrics["mean_confidence"])
 
-                # Update global step counter
                 self.current_step = step
 
                 if step % 5 == 0:
@@ -901,37 +799,17 @@ class SimpleRLTrainer:
                     print(f"  Factuality: {extra_metrics['mean_factuality']:.4f}, "
                           f"Confidence: {extra_metrics['mean_confidence']:.4f}, "
                           f"Abstention Rate: {extra_metrics['abstention_rate']:.2%}")
-                    # Print KL divergence metrics if KL penalty is enabled
                     if self.config.kl_penalty > 0.0:
                         print(f"  KL Loss: {extra_metrics.get('kl_loss', 0.0):.4f}, "
                               f"KL Div: {extra_metrics.get('mean_kl_div', 0.0):.4f}")
 
-                # Periodic checkpoint saving
+                # Periodic checkpoint
                 if step > 0 and step % checkpoint_interval == 0:
                     print(f"\n{'='*70}")
                     print(f"Saving periodic checkpoint at step {step}...")
                     self.save_checkpoint()
-
-                    # Save prediction details to JSON
-                    predictions_file = f"predictions_step_{step}.json"
-                    if "predictions" in extra_metrics:
-                        with open(predictions_file, 'w', encoding='utf-8') as f:
-                            json.dump({
-                                "step": step,
-                                "epoch": epoch,
-                                "predictions": extra_metrics["predictions"],
-                                "summary": {
-                                    "mean_factuality": extra_metrics["mean_factuality"],
-                                    "mean_confidence": extra_metrics["mean_confidence"],
-                                    "abstention_rate": extra_metrics["abstention_rate"],
-                                    "mean_reward": mean_reward
-                                }
-                            }, f, indent=2, ensure_ascii=False)
-                        print(f"Saved predictions to {predictions_file}")
-
                     print(f"{'='*70}\n")
 
-            # Check if we should exit after epoch
             if self.should_exit:
                 break
 
@@ -949,7 +827,6 @@ class SimpleRLTrainer:
             print(f"  Avg Loss: {avg_loss:.4f}, Avg Reward: {avg_reward:.4f}")
             print(f"  Avg Factuality: {avg_factuality:.4f}, Avg Confidence: {avg_confidence:.4f}")
 
-            # Save checkpoint at end of epoch
             print(f"\nSaving end-of-epoch checkpoint...")
             self.save_checkpoint()
 
@@ -961,15 +838,7 @@ class SimpleRLTrainer:
         }
 
     def generate_response(self, prompt: str) -> str:
-        """
-        Generate a response for a given prompt using the trained policy
-
-        Args:
-            prompt: Input prompt
-
-        Returns:
-            Generated response text
-        """
+        """Generate a response for a given prompt"""
         self.policy.eval()
 
         with torch.no_grad():
@@ -985,15 +854,14 @@ class SimpleRLTrainer:
             gen_ids = self.policy.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_new_tokens=64,  # Use reasonable length for evaluation
-                do_sample=True,  # Use sampling (same as training)
-                top_p=0.9,  # Nucleus sampling (same as training)
-                temperature=0.8,  # Same as training
+                max_new_tokens=64,
+                do_sample=True,
+                top_p=0.9,
+                temperature=0.8,
                 pad_token_id=self.tokenizer.pad_token_id,
-                eos_token_id=self.tokenizer.eos_token_id  # Tell model when to stop
+                eos_token_id=self.tokenizer.eos_token_id
             )
 
-            # Decode only the generated part (skip the prompt)
             response = self.tokenizer.decode(
                 gen_ids[0][input_ids.shape[1]:],
                 skip_special_tokens=True
@@ -1005,292 +873,79 @@ class SimpleRLTrainer:
         """Load training checkpoint to resume training"""
         print(f"\nLoading checkpoint from {checkpoint_path}...")
 
-        # Load training state
         state_path = os.path.join(checkpoint_path, 'training_state.pt')
         if os.path.exists(state_path):
             state = torch.load(state_path, map_location=self.device)
             self.current_step = state.get('current_step', 0)
             self.current_epoch = state.get('current_epoch', 0)
 
-            # Load optimizer state if it exists
             if self.optimizer and state.get('optimizer_state'):
                 self.optimizer.load_state_dict(state['optimizer_state'])
 
-            # Ensure model is in training mode with gradients enabled
             self.policy.train()
-            print(f"Model set to training mode")
-
-            # Verify LoRA parameters have gradients
-            lora_params_with_grad = sum(1 for n, p in self.policy.named_parameters()
-                                       if 'lora' in n.lower() and p.requires_grad)
-            print(f"LoRA parameters with gradients: {lora_params_with_grad}")
-
             print(f"Checkpoint loaded: epoch {self.current_epoch}, step {self.current_step}")
         else:
             print(f"Warning: training_state.pt not found in {checkpoint_path}")
 
     def save_policy(self, path: str):
-        """
-        Save the trained policy model (LoRA adapters only).
-
-        This saves only the LoRA adapter weights (~80MB), not the full model.
-        To merge and save the full model, use merge_and_save_full_model().
-        """
+        """Save the trained policy model (LoRA adapters only)"""
         print(f"Saving LoRA adapters to {path}...")
         self.policy.save_pretrained(path)
         self.tokenizer.save_pretrained(path)
         print(f"LoRA adapters saved to {path}")
 
-    def merge_and_save_full_model(
-        self,
-        adapter_path: str,
-        output_path: str,
-        push_to_hub: bool = False,
-        repo_id: str = None
-    ):
-        """
-        Merge LoRA adapters with base model and save/push the full model.
-
-        This follows the approach from save_model.py:
-        1. Reload base model in FP16
-        2. Load LoRA adapters
-        3. Merge adapters into base model
-        4. Optionally push to HuggingFace Hub
-
-        Args:
-            adapter_path: Path to saved LoRA adapters
-            output_path: Path to save the merged full model
-            push_to_hub: Whether to push to HuggingFace Hub
-            repo_id: HuggingFace repo ID (required if push_to_hub=True)
-        """
-        from peft import PeftModel
-
-        print("\n" + "="*70)
-        print("Merging LoRA adapters with base model...")
-        print("="*70)
-
-        # Clear GPU memory
-        torch.cuda.empty_cache()
-
-        # 1. Reload base model in FP16 (cannot merge 4bit directly)
-        print(f"Loading base model {self.config.policy_model_name} in FP16...")
-        base_model = AutoModelForCausalLM.from_pretrained(
-            self.config.policy_model_name,
-            return_dict=True,
-            torch_dtype=torch.float16,
-            device_map="auto",
-            trust_remote_code=True
-        )
-
-        # 2. Load the adapter using the base_model object
-        print(f"Loading LoRA adapters from {adapter_path}...")
-        model = PeftModel.from_pretrained(base_model, adapter_path)
-
-        # 3. Merge
-        print("Merging adapters into base model...")
-        model = model.merge_and_unload()
-
-        # 4. Save locally
-        print(f"Saving merged model to {output_path}...")
-        model.save_pretrained(output_path, safe_serialization=True)
-        self.tokenizer.save_pretrained(output_path)
-        print(f"Merged model saved to {output_path}")
-
-        # 5. Push to hub if requested
-        if push_to_hub:
-            if repo_id is None:
-                raise ValueError("repo_id must be provided when push_to_hub=True")
-            print(f"Pushing to HuggingFace Hub: {repo_id}...")
-            model.push_to_hub(repo_id, safe_serialization=True)
-            self.tokenizer.push_to_hub(repo_id)
-            print(f"Model pushed to {repo_id}")
-
-        print("="*70)
-        print("Merge complete!")
-        print("="*70)
-
-    def evaluate_on_hotpotqa(
-        self,
-        questions: List[str],
-        gold_answers: List[List[str]],
-        reward_model_trainer: 'RewardModelTrainer' = None
-    ) -> Dict[str, float]:
-        """
-        Evaluate the trained policy on HotpotQA questions using official metrics.
-
-        Args:
-            questions: List of HotpotQA questions
-            gold_answers: List of lists of gold answers (multiple possible answers per question)
-            reward_model_trainer: Optional reward model trainer to compute reward scores
-
-        Returns:
-            Dictionary with EM, F1, Precision, Recall, and reward metrics
-        """
-        self.policy.eval()
-
-        print("\n" + "="*70)
-        print(f"Evaluating policy on {len(questions)} HotpotQA questions")
-        print("="*70)
-
-        pred_answers = []
-        rewards = []
-        factuality_scores = []
-        confidence_scores = []
-
-        for i, question in enumerate(questions):
-            # Generate response
-            response = self.generate_response(question)
-            pred_answers.append(response)
-
-            # Compute reward if reward model is provided
-            if reward_model_trainer is not None:
-                reward = reward_model_trainer.score_text(question, response)
-                rewards.append(reward)
-
-                # Get detailed factuality score
-                _, _, f = reward_model_trainer.model.verifier.compute_factuality_score(
-                    [question], [response]
-                )
-                factuality_scores.append(f[0].item())
-
-            if (i + 1) % 20 == 0:
-                print(f"Processed {i+1}/{len(questions)} questions...")
-
-        # Compute HotpotQA metrics
-        metrics = compute_metrics(gold_answers, pred_answers)
-
-        # Add reward metrics if available
-        if rewards:
-            metrics['Avg_Reward'] = np.mean(rewards)
-        if factuality_scores:
-            metrics['Avg_Factuality'] = np.mean(factuality_scores)
-
-        print("\n" + "="*70)
-        print("HotpotQA Evaluation Results:")
-        print("="*70)
-        print(f"  Exact Match (EM): {metrics['EM']:.2f}%")
-        print(f"  F1 Score: {metrics['F1']:.2f}%")
-        print(f"  Precision: {metrics['Precision']:.2f}%")
-        print(f"  Recall: {metrics['Recall']:.2f}%")
-        if 'Avg_Reward' in metrics:
-            print(f"  Average Reward: {metrics['Avg_Reward']:.4f}")
-        if 'Avg_Factuality' in metrics:
-            print(f"  Average Factuality: {metrics['Avg_Factuality']:.4f}")
-        print("="*70)
-
-        return metrics
-
 
 ################################################################################
-# Example usage and demonstration
+# Main Training Loop with DISTRACTOR setting
 ################################################################################
-
-def create_example_prompts() -> List[str]:
-    """Create example questions for RL training"""
-    return [
-        "What is the capital of France?",
-        "Who invented the telephone?",
-        "What is the speed of light?",
-        "Who wrote Romeo and Juliet?",
-        "What is photosynthesis?",
-    ]
-
 
 def main(resume_from_checkpoint=None):
     """
-    Verifier-Based Reward Learning RLHF demonstration:
-
-    Uses NLI verifier (DeBERTa-FEVER) + entropy confidence for factuality-based rewards.
-    Trains policy using REINFORCE with R(x,y) = f * (λ_base + λ_conf * conf).
+    DISTRACTOR SETTING RLHF:
+    - Policy receives: Question + ALL paragraphs (including distractors)
+    - Verifier receives: Question + ONLY supporting facts
 
     Args:
-        resume_from_checkpoint: Path to checkpoint directory to resume training from
+        resume_from_checkpoint: Path to checkpoint directory to resume from
     """
     print("="*70)
-    print("Verifier-Based Reward Learning RLHF (Qwen2-7B)")
+    print("Distractor-Setting RLHF (Qwen2-7B)")
     if resume_from_checkpoint:
         print(f"RESUMING FROM CHECKPOINT: {resume_from_checkpoint}")
     print("="*70)
 
     # ========================================================================
-    # Initialize Verifier-Based Reward Model (No Training Required)
+    # Initialize Reward Model
     # ========================================================================
     print("\n" + "="*70)
     print("Initializing Verifier-Based Reward Model")
     print("="*70)
 
-    # Configuration
     rm_config = RewardModelConfig(
         verifier_model="MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli",
         lambda_base=0.5,
         lambda_conf=0.5
     )
 
-    # Initialize reward model (uses pre-trained verifier, no training needed)
-    print("\nLoading pre-trained NLI verifier...")
-    print(f"Device: {rm_config.device}")
+    print(f"\nDevice: {rm_config.device}")
     print(f"Verifier: {rm_config.verifier_model}")
     rm_trainer = RewardModelTrainer(rm_config)
 
-    # Test reward scoring
-    print("\n" + "="*70)
-    print("Testing Verifier-Based Reward:")
-    print("="*70)
-
-    test_qa_pairs = [
-        ("What is the capital of France?", "Paris"),
-        ("What is the capital of France?", "The capital of France is Paris."),
-        ("What is the capital of France?", "London"),  # Incorrect
-        ("Who invented the telephone?", "Alexander Graham Bell"),
-        ("Who invented the telephone?", "Thomas Edison"),  # Incorrect
-    ]
-
-    for question, answer in test_qa_pairs:
-        score = rm_trainer.score_text(question, answer)
-        print(f"\nQ: {question}")
-        print(f"A: {answer}")
-        print(f"Reward: {score:.4f}")
-
-    # Test comparison
-    print("\n" + "="*70)
-    print("Testing Response Comparison:")
-    print("="*70)
-
-    question = "What is the capital of France?"
-    response_correct = "Paris"
-    response_wrong = "London"
-
-    comparison = rm_trainer.compare_responses(question, response_correct, response_wrong)
-    print(f"\nQuestion: {question}")
-    print(f"\nResponse A: {response_correct}")
-    print(f"Score A: {comparison['score_a']:.4f}")
-    print(f"\nResponse B: {response_wrong}")
-    print(f"Score B: {comparison['score_b']:.4f}")
-    print(f"\nP(A preferred over B): {comparison['prob_a_preferred']:.4f}")
-
-    # Save reward config
-    print("\nSaving reward model configuration...")
-    rm_trainer.save_model("verifier_reward_config.pt")
+    rm_trainer.save_model("verifier_reward_config_distractor.pt")
 
     # ========================================================================
-    # Policy Training with REINFORCE + Verifier Rewards
+    # Initialize RL Trainer
     # ========================================================================
     print("\n" + "="*70)
-    print("REINFORCE Policy Training with Verifier Rewards")
+    print("REINFORCE Training with Distractor Setting")
     print("="*70)
 
-    # Get the reward model
     reward_model = rm_trainer.model
     reward_model.eval()
 
-    # Configuration for RL training
-    # OPTION 1: Use base Qwen2-7B model
-    # OPTION 2: Use fine-tuned HotpotQA model (recommended for better baseline)
-    # OPTION 3: Resume from checkpoint (overrides above options)
-    USE_FINETUNED_MODEL = True  # Set to False to use base model
+    USE_FINETUNED_MODEL = True
 
     if resume_from_checkpoint:
-        # When resuming, load from checkpoint directory
         policy_model = resume_from_checkpoint
         print(f"\nResuming from checkpoint: {policy_model}")
     elif USE_FINETUNED_MODEL:
@@ -1300,35 +955,30 @@ def main(resume_from_checkpoint=None):
 
     rl_config = SimpleRLConfig(
         policy_model_name=policy_model,
-        learning_rate=5e-7,        # ← Reduced from 1e-5
-        batch_size=2,              # ← Reduced from 4 to save memory
+        learning_rate=5e-7,
+        batch_size=2,
         num_epochs=1,
         max_new_tokens=20,
-        kl_penalty=0.0        # ← Set to 0.0 to disable reference policy and save ~11GB GPU memory
+        max_length=2048,  # Larger for distractor context
+        kl_penalty=0.0
     )
 
-    # Initialize RL trainer
-    print(f"\nInitializing REINFORCE trainer...")
-    print(f"Device: {rl_config.device}")
-    print(f"Policy Model: {rl_config.policy_model_name}")
-    if rl_config.kl_penalty > 0.0:
-        print(f"KL Penalty: {rl_config.kl_penalty} (prevents policy drift from reference)")
-    else:
-        print(f"KL Penalty: DISABLED (saves ~11GB GPU memory by not loading reference policy)")
+    print(f"\nPolicy Model: {rl_config.policy_model_name}")
+    print(f"KL Penalty: {rl_config.kl_penalty}")
     rl_trainer = SimpleRLTrainer(rl_config, reward_model)
 
-    # Load checkpoint state if resuming
     if resume_from_checkpoint:
         rl_trainer.load_checkpoint(resume_from_checkpoint)
 
-    # Load HotpotQA training data (all samples starting from position 10000)
-    print("\nLoading HotpotQA training data (all samples starting from position 10000)...")
+    # ========================================================================
+    # Load HotpotQA with DISTRACTOR setting
+    # ========================================================================
+    print("\nLoading HotpotQA DISTRACTOR data (all samples from position 10000)...")
     from datasets import load_dataset
 
-    dataset = load_dataset("hotpot_qa", "fullwiki", split="train")
-    # Get total dataset size and use all samples from 10000 onwards
+    dataset = load_dataset("hotpot_qa", "distractor", split="train")  # ← DISTRACTOR split!
     total_samples = len(dataset)
-    print(f"Total training samples in HotpotQA: {total_samples}")
+    print(f"Total training samples: {total_samples}")
     dataset = dataset.select(range(10000, total_samples))
 
     training_data = []
@@ -1336,34 +986,51 @@ def main(resume_from_checkpoint=None):
         question = example['question']
         gold_answer = example['answer']
 
-        # Extract context (supporting documents) for verification
-        # HotpotQA context format: {'title': [...], 'sentences': [[...], [...]]}
+        # Get ALL context (including distractors) - for POLICY
         context_titles = example['context']['title']
         context_sentences = example['context']['sentences']
 
-        # Format context as evidence text
-        evidence_parts = []
+        all_context_parts = []
         for title, sentences in zip(context_titles, context_sentences):
-            evidence_parts.append(f"{title}: {' '.join(sentences)}")
-        evidence = "\n".join(evidence_parts)
+            all_context_parts.append(f"{title}: {' '.join(sentences)}")
+        all_context = "\n".join(all_context_parts)
 
-        # Format as closed-book QA prompt with abstention instruction
-        prompt = f"""You are an expert at giving concise answers. Do not give any explanations, only a short answer.
+        # Get ONLY supporting facts - for VERIFIER
+        supporting_titles = example['supporting_facts']['title']
+        supporting_sent_ids = example['supporting_facts']['sent_id']
 
-IMPORTANT: If you are not confident or do not know the answer, simply respond with "I don't know" rather than guessing.
+        # Build supporting evidence
+        supporting_parts = []
+        for supp_title, supp_sent_id in zip(supporting_titles, supporting_sent_ids):
+            # Find the paragraph with this title
+            for i, title in enumerate(context_titles):
+                if title == supp_title:
+                    sentences = context_sentences[i]
+                    if supp_sent_id < len(sentences):
+                        supporting_parts.append(f"{supp_title}: {sentences[supp_sent_id]}")
+                    break
+
+        supporting_evidence = "\n".join(supporting_parts) if supporting_parts else question
+
+        # Format prompt WITH all context (distractors) for policy
+        prompt_with_all_context = f"""You are an expert at answering questions. Read the context and answer the question concisely.
+
+Context:
+{all_context}
 
 Question: {question}
 Answer: """
-        training_data.append((prompt, gold_answer, evidence))
 
-    print(f"Loaded {len(training_data)} training samples from HotpotQA (with context for verification)")
+        training_data.append((prompt_with_all_context, gold_answer, supporting_evidence))
 
-    # Train policy with REINFORCE
-    print(f"\nTraining policy with REINFORCE + verifier rewards ({len(training_data)} samples)...")
-    print(f"Training setup:")
-    print(f"  - Policy: Closed-book QA (no context in prompt)")
-    print(f"  - Verifier: Uses HotpotQA context to verify factuality of generated answers")
-    print(f"  - KL Penalty: β={rl_config.kl_penalty} (prevents catastrophic forgetting)")
+    print(f"Loaded {len(training_data)} training samples")
+    print(f"Policy sees: Question + ALL context (with distractors)")
+    print(f"Verifier sees: Question + ONLY supporting facts")
+
+    # ========================================================================
+    # Train
+    # ========================================================================
+    print(f"\nTraining with DISTRACTOR setting ({len(training_data)} samples)...")
     rl_metrics = rl_trainer.train(training_data)
 
     print(f"\nTraining Results:")
@@ -1372,50 +1039,20 @@ Answer: """
     print(f"Final Avg Factuality: {rl_metrics['factuality'][-1]:.4f}")
     print(f"Final Avg Confidence: {rl_metrics['confidence'][-1]:.4f}")
 
-    # Test generation from trained policy
-    print("\n" + "="*70)
-    print("Testing Trained Policy:")
-    print("="*70)
-
-    test_questions = [
-        "What is the capital of France?",
-        "Who invented the telephone?",
-        "What is photosynthesis?"
-    ]
-
-    for question in test_questions:
-        response = rl_trainer.generate_response(question)
-        print(f"\nQ: {question}")
-        print(f"A: {response}")
-
-        # Score the response
-        reward = rm_trainer.score_text(question, response)
-        print(f"Reward: {reward:.4f}")
-
-    # Save trained policy (LoRA adapters only)
+    # ========================================================================
+    # Save
+    # ========================================================================
     print("\n" + "="*70)
     print("Saving trained policy...")
-    rl_trainer.save_policy("verifier_rlhf_policy")
-
-    print("\nMerging LoRA adapters with base model...")
-    rl_trainer.merge_and_save_full_model(
-         adapter_path="verifier_rlhf_policy",
-         output_path="verifier_rlhf_full_model",
-         push_to_hub=True,
-         repo_id="jxrma/Qwen2.5-7B-RLHF-HotpotQA-v2"  # Change to your desired repo name
- )
+    rl_trainer.save_policy("distractor_rlhf_policy")
 
     print("\n" + "="*70)
-    print("Verifier-Based RLHF Training Complete!")
+    print("Distractor-Setting RLHF Training Complete!")
     print("="*70)
-    print("\nSummary:")
-    print(f"- Reward: Factuality (NLI verifier) + Confidence (entropy)")
-    print(f"- Loss: REINFORCE + KL Divergence Penalty (β={rl_config.kl_penalty})")
-    print(f"- Final Avg Reward: {rl_metrics['rewards'][-1]:.4f}")
-    print(f"- Final Avg Factuality: {rl_metrics['factuality'][-1]:.4f}")
-    print(f"- Final Avg Confidence: {rl_metrics['confidence'][-1]:.4f}")
-    print(f"- Reward config saved to: verifier_reward_config.pt")
-    print(f"- LoRA adapters saved to: verifier_rlhf_policy/")
+    print(f"- Policy trained on: Question + ALL context (distractors)")
+    print(f"- Verifier used: Question + ONLY supporting facts")
+    print(f"- Final Reward: {rl_metrics['rewards'][-1]:.4f}")
+    print(f"- Model saved to: distractor_rlhf_policy/")
     print("="*70)
 
 
@@ -1423,7 +1060,7 @@ if __name__ == "__main__":
     import glob
 
     # Auto-detect latest checkpoint for resuming
-    checkpoint_dir = "checkpoints"
+    checkpoint_dir = "checkpoints_distractor"
     resume_checkpoint = None
 
     if os.path.exists(checkpoint_dir):
@@ -1443,7 +1080,7 @@ if __name__ == "__main__":
             latest_checkpoint = checkpoint_paths[0]
 
             print("\n" + "="*70)
-            print("CHECKPOINT DETECTED")
+            print("CHECKPOINT DETECTED (DISTRACTOR)")
             print("="*70)
             print(f"Latest checkpoint found: {latest_checkpoint}")
             print(f"Available checkpoints: {len(checkpoint_paths)}")
