@@ -35,6 +35,9 @@ from dataclasses import dataclass
 import re
 import string
 from collections import Counter
+import signal
+import sys
+import os
 
 # Import reward components from reward_and_loss.py
 from reward_and_loss import (
@@ -504,6 +507,52 @@ class SimpleRLTrainer:
             lr=config.learning_rate
         ) if reward_model is not None else None
 
+        # Checkpoint management
+        self.checkpoint_dir = "checkpoints"
+        self.current_step = 0
+        self.current_epoch = 0
+        self.should_exit = False
+
+        # Register signal handlers for graceful shutdown with checkpoint saving
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)
+
+    def _signal_handler(self, signum, _):
+        """Handle SIGTERM and SIGINT by saving checkpoint and exiting gracefully"""
+        print(f"\n{'='*70}")
+        print(f"Received signal {signum} - saving checkpoint before exit...")
+        print(f"{'='*70}")
+        self.save_checkpoint(f"checkpoint_interrupted_step_{self.current_step}")
+        print(f"Checkpoint saved. Exiting gracefully.")
+        self.should_exit = True
+        sys.exit(0)
+
+    def save_checkpoint(self, checkpoint_name: str = None):
+        """Save training checkpoint including model state and training progress"""
+        if checkpoint_name is None:
+            checkpoint_name = f"checkpoint_epoch_{self.current_epoch}_step_{self.current_step}"
+
+        checkpoint_path = os.path.join(self.checkpoint_dir, checkpoint_name)
+        os.makedirs(checkpoint_path, exist_ok=True)
+
+        print(f"\nSaving checkpoint to {checkpoint_path}...")
+
+        # Save LoRA adapters (policy)
+        self.policy.save_pretrained(checkpoint_path)
+        self.tokenizer.save_pretrained(checkpoint_path)
+
+        # Save training state
+        state = {
+            'current_step': self.current_step,
+            'current_epoch': self.current_epoch,
+            'optimizer_state': self.optimizer.state_dict() if self.optimizer else None,
+            'config': self.config.__dict__
+        }
+        torch.save(state, os.path.join(checkpoint_path, 'training_state.pt'))
+
+        print(f"Checkpoint saved: {checkpoint_path}")
+        return checkpoint_path
+
     def compute_logprobs(
         self,
         input_ids: torch.Tensor,
@@ -716,8 +765,14 @@ class SimpleRLTrainer:
         print("\n" + "="*70)
         print("REINFORCE Policy Training with Verifier-Based Rewards")
         print("="*70)
+        print(f"Checkpoints will be saved every 1000 steps to {self.checkpoint_dir}/")
+        print(f"Use Ctrl+C or kill signal to save checkpoint and exit gracefully")
+        print("="*70)
+
+        checkpoint_interval = 1000  # Save checkpoint every 1000 steps
 
         for epoch in range(self.config.num_epochs):
+            self.current_epoch = epoch
             epoch_losses = []
             epoch_rewards = []
             epoch_factuality = []
@@ -729,6 +784,11 @@ class SimpleRLTrainer:
             random.shuffle(indices)
 
             for step in range(0, len(training_data), self.config.batch_size):
+                # Check if we should exit gracefully
+                if self.should_exit:
+                    print("Graceful shutdown requested. Exiting training loop...")
+                    break
+
                 # Get batch indices
                 batch_indices = indices[step:step + self.config.batch_size]
                 batch = [training_data[i] for i in batch_indices]
@@ -740,6 +800,9 @@ class SimpleRLTrainer:
                 epoch_factuality.append(extra_metrics["mean_factuality"])
                 epoch_confidence.append(extra_metrics["mean_confidence"])
 
+                # Update global step counter
+                self.current_step = step
+
                 if step % 5 == 0:
                     print(f"Epoch {epoch+1}/{self.config.num_epochs}, Step {step}")
                     print(f"  Loss: {loss:.4f}, Reward: {mean_reward:.4f}")
@@ -749,6 +812,17 @@ class SimpleRLTrainer:
                     if self.config.kl_penalty > 0.0:
                         print(f"  KL Loss: {extra_metrics.get('kl_loss', 0.0):.4f}, "
                               f"KL Div: {extra_metrics.get('mean_kl_div', 0.0):.4f}")
+
+                # Periodic checkpoint saving
+                if step > 0 and step % checkpoint_interval == 0:
+                    print(f"\n{'='*70}")
+                    print(f"Saving periodic checkpoint at step {step}...")
+                    self.save_checkpoint()
+                    print(f"{'='*70}\n")
+
+            # Check if we should exit after epoch
+            if self.should_exit:
+                break
 
             avg_loss = np.mean(epoch_losses)
             avg_reward = np.mean(epoch_rewards)
@@ -763,6 +837,10 @@ class SimpleRLTrainer:
             print(f"\nEpoch {epoch+1} completed:")
             print(f"  Avg Loss: {avg_loss:.4f}, Avg Reward: {avg_reward:.4f}")
             print(f"  Avg Factuality: {avg_factuality:.4f}, Avg Confidence: {avg_confidence:.4f}")
+
+            # Save checkpoint at end of epoch
+            print(f"\nSaving end-of-epoch checkpoint...")
+            self.save_checkpoint()
 
         return {
             'losses': losses,
@@ -811,6 +889,25 @@ class SimpleRLTrainer:
             )
 
         return response
+
+    def load_checkpoint(self, checkpoint_path: str):
+        """Load training checkpoint to resume training"""
+        print(f"\nLoading checkpoint from {checkpoint_path}...")
+
+        # Load training state
+        state_path = os.path.join(checkpoint_path, 'training_state.pt')
+        if os.path.exists(state_path):
+            state = torch.load(state_path, map_location=self.device)
+            self.current_step = state.get('current_step', 0)
+            self.current_epoch = state.get('current_epoch', 0)
+
+            # Load optimizer state if it exists
+            if self.optimizer and state.get('optimizer_state'):
+                self.optimizer.load_state_dict(state['optimizer_state'])
+
+            print(f"Checkpoint loaded: epoch {self.current_epoch}, step {self.current_step}")
+        else:
+            print(f"Warning: training_state.pt not found in {checkpoint_path}")
 
     def save_policy(self, path: str):
         """
