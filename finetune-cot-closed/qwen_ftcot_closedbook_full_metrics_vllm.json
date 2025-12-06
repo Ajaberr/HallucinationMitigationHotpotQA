@@ -1,0 +1,9 @@
+{
+    "model": "fsiddiqui2/Qwen2.5-7B-Instruct-HotpotQA-CoT-Finetuned-2-10000",
+    "dataset": "hotpot_qa",
+    "subset": "distractor",
+    "samples": 7405,
+    "format_compliance_rate": 99.82444294395678,
+    "exact_match": 23.808237677245106,
+    "f1_score": 32.90198059640691
+}

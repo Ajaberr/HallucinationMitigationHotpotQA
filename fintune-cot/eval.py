@@ -13,7 +13,7 @@ import os
 # ==========================================
 
 # Use the ID where you uploaded your fine-tuned model
-MODEL_ID = "fsiddiqui2/Qwen2.5-7B-Instruct-HotpotQA-CoT-Finetuned-1000" 
+MODEL_ID = "fsiddiqui2/Qwen2.5-7B-Instruct-HotpotQA-CoT-Finetuned-10000" 
 DATASET_NAME = "hotpot_qa"
 SUBSET_NAME = "distractor" # Using distractor to match typical Hotpot eval
 SPLIT = "validation"

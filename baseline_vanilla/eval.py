@@ -16,8 +16,8 @@ SUBSET_NAME = "distractor"
 SPLIT = "validation"
 NUM_SAMPLES = 1000 # Adjusted for testing
 RAUQ_ALPHA = 0.2
-DETAILED_OUTPUT_FILE = "detailed_results.json"
-FINAL_METRICS_FILE = "final_metrics.json"
+DETAILED_OUTPUT_FILE = "qwen_base_closedbook_results.json"
+FINAL_METRICS_FILE = "qwen_based_closedbook_metrics.json"
 
 def load_model_and_tokenizer(model_id):
     print(f"Loading model: {model_id}...")

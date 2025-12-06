@@ -6,7 +6,7 @@ from transformers import (
 from peft import PeftModel
 
 MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
-NEW_MODEL_NAME = "Qwen2.5-7B-Instruct-HotpotQA-CoT-Finetuned-1000"
+NEW_MODEL_NAME = "Qwen2.5-7B-Instruct-HotpotQA-CoT-Finetuned-10000"
 HF_USERNAME = "fsiddiqui2" 
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)

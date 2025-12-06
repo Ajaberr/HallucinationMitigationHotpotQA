@@ -167,7 +167,7 @@ model.print_trainable_parameters()
 # Parameters roughly aligned with standard fine-tuning practices for CoT
 training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
-    num_train_epochs=3,                     # CoT usually benefits from slightly more epochs than simple QA
+    num_train_epochs=1,                     # CoT usually benefits from slightly more epochs than simple QA
     per_device_train_batch_size=4,          
     gradient_accumulation_steps=4,
     learning_rate=2e-4,
