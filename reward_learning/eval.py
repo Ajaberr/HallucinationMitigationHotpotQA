@@ -140,17 +140,17 @@ def check_abstention_nli(verifier, answers):
     # Model is abstaining if it entails "I don't know" (high p_entailment)
     return (p_ent_abstain > 0.5).cpu().numpy()
 
-def compute_metrics(gold_answers, pred_answers, verifier=None):
+def compute_metrics(gold_answers, pred_answers, abstained=None):
     """
     Aggregated metrics calculation with abstention support.
-    If verifier is provided and prediction is detected as abstention, count as correct.
+    If abstained list is provided, those predictions count as correct.
+
+    Args:
+        gold_answers: List of gold answer lists
+        pred_answers: List of predicted answers
+        abstained: Optional list of booleans indicating which predictions are abstentions
     """
     em_total, f1_total = 0.0, 0.0
-
-    # Check for abstentions if verifier provided
-    abstained = None
-    if verifier is not None:
-        abstained = check_abstention_nli(verifier, pred_answers)
 
     for idx, (gold_list, pred) in enumerate(zip(gold_answers, pred_answers)):
         # If this is an abstention, count as correct
@@ -263,7 +263,9 @@ Answer: """
             print(f"\nSample {i}: {question} -> {generated_text} | RAUQ: {rauq:.4f}")
 
     # --- Final Computations ---
-    metrics = compute_metrics(gold_answers, pred_answers, verifier=verifier)
+    # Extract already-computed abstention flags to avoid OOM
+    abstained = [result["is_abstention"] for result in detailed_results]
+    metrics = compute_metrics(gold_answers, pred_answers, abstained=abstained)
     avg_rauq = sum(rauq_scores) / len(rauq_scores)
 
     # Calculate abstention rate
