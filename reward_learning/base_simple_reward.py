@@ -170,6 +170,7 @@ class RewardModelConfig:
     verifier_model: str = "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
     lambda_base: float = 0.5
     lambda_conf: float = 0.5
+    abstention_reward: float = 0.3  # Positive reward for abstentions (between 0 and correct answer)
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -188,6 +189,7 @@ class RewardModel:
         verifier_model: str = "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli",
         lambda_base: float = 0.5,
         lambda_conf: float = 0.5,
+        abstention_reward: float = 0.3,
         device: str = "cuda" if torch.cuda.is_available() else "cpu"
     ):
         # Initialize verifier
@@ -210,6 +212,7 @@ class RewardModel:
         self.device = device
         self.lambda_base = lambda_base
         self.lambda_conf = lambda_conf
+        self.abstention_reward = abstention_reward
 
     def set_vocab_size(self, vocab_size: int):
         """Set vocab size for entropy calculation (call this after policy is loaded)"""
@@ -270,6 +273,7 @@ class RewardModelTrainer:
             verifier_model=config.verifier_model,
             lambda_base=config.lambda_base,
             lambda_conf=config.lambda_conf,
+            abstention_reward=config.abstention_reward,
             device=config.device
         )
 
@@ -343,7 +347,8 @@ class RewardModelTrainer:
         torch.save({
             'config': self.config,
             'lambda_base': self.model.lambda_base,
-            'lambda_conf': self.model.lambda_conf
+            'lambda_conf': self.model.lambda_conf,
+            'abstention_reward': self.model.abstention_reward
         }, path)
         print(f"Reward config saved to {path}")
 
@@ -356,6 +361,8 @@ class RewardModelTrainer:
             self.model.lambda_base = checkpoint['lambda_base']
         if 'lambda_conf' in checkpoint:
             self.model.lambda_conf = checkpoint['lambda_conf']
+        if 'abstention_reward' in checkpoint:
+            self.model.abstention_reward = checkpoint['abstention_reward']
         print(f"Reward config loaded from {path}")
 
 
@@ -366,7 +373,7 @@ class RewardModelTrainer:
 @dataclass
 class SimpleRLConfig:
     """Configuration for REINFORCE policy training"""
-    policy_model_name: str = "Qwen/Qwen2-7B"
+    policy_model_name: str = "Qwen/Qwen2.5-7B-Instruct"  # Use instruct model that knows to abstain naturally
     learning_rate: float = 1e-5
     batch_size: int = 2
     num_epochs: int = 1
@@ -375,6 +382,7 @@ class SimpleRLConfig:
     temperature: float = 1.0
     top_p: float = 0.9
     kl_penalty: float = 0.1  # KL divergence penalty coefficient (0.0 = no penalty, 0.01-0.1 = recommended)
+    exploration_epsilon: float = 0.40  # Bootstrap: 40% forced abstentions to seed learning (increased due to strong HotpotQA prior)
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -639,12 +647,14 @@ class SimpleRLTrainer:
         # IMPORTANT: Set to eval mode for generation to avoid NaN with LoRA + quantization
         self.policy.eval()
         with torch.no_grad():
-            # Use greedy decoding during training for stability
+            # Use sampling for exploration (allows model to discover abstentions)
             gen_ids = self.policy.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 max_new_tokens=self.config.max_new_tokens,
-                do_sample=False,             # Use greedy decoding during training
+                do_sample=True,              # Use sampling for exploration
+                temperature=self.config.temperature,
+                top_p=self.config.top_p,
                 pad_token_id=self.tokenizer.pad_token_id,
                 eos_token_id=self.tokenizer.eos_token_id,
                 return_dict_in_generate=False  # Returns sequences only, not dict
@@ -658,6 +668,18 @@ class SimpleRLTrainer:
             generated_sequences,
             skip_special_tokens=True
         )
+
+        # EXPLORATION BOOTSTRAP: Force small % to abstain to seed initial learning
+        # Without this, model never generates "I don't know" → can't learn abstention reward
+        import random
+        if hasattr(self.config, 'exploration_epsilon') and self.config.exploration_epsilon > 0:
+            forced_count = 0
+            for i in range(len(generated_answers)):
+                if random.random() < self.config.exploration_epsilon:
+                    generated_answers[i] = "I don't know"
+                    forced_count += 1
+            if forced_count > 0:
+                print(f"[Bootstrap] Forced {forced_count}/{len(generated_answers)} abstentions for exploration")
 
         # 3) Recompute logits safely via separate forward pass (NUMERICAL SAFETY)
         # This is needed for: (a) REINFORCE log_probs, (b) entropy-based confidence
@@ -735,10 +757,11 @@ class SimpleRLTrainer:
 
             reward_answer = base_reward * penalty_multiplier  # [B]
 
-            # --- APPLY ABSTENTION: R = 0 if abstained ---
+            # --- APPLY ABSTENTION: Positive reward for abstentions ---
+            abstention_reward_val = self.reward_model.abstention_reward
             rewards = torch.where(
                 abstained,
-                torch.zeros_like(reward_answer),
+                torch.full_like(reward_answer, abstention_reward_val),
                 reward_answer
             )
 
@@ -748,14 +771,6 @@ class SimpleRLTrainer:
             rewards_std = rewards.std()
             if rewards_std > 1e-8:  # Avoid division by zero
                 rewards = (rewards - rewards_mean) / (rewards_std + 1e-8)
-
-            # RE-ZERO abstentions after normalization to preserve "abstention = neutral" property
-            # Otherwise normalization shifts them away from 0
-            rewards = torch.where(
-                abstained,
-                torch.zeros_like(rewards),
-                rewards
-            )
 
             # Store original stats for logging
             original_reward_mean = rewards_mean.item()
@@ -818,7 +833,7 @@ class SimpleRLTrainer:
         prediction_details = []
         for i in range(len(generated_answers)):
             prediction_details.append({
-                "question": questions[i],
+                "question": prompts[i],
                 "generated_answer": generated_answers[i],
                 "gold_answer": gold_answers[i],
                 "abstention_score": abstention_scores[i].item(),
@@ -1304,6 +1319,7 @@ def main(resume_from_checkpoint=None):
         batch_size=2,              # ← Reduced from 4 to save memory
         num_epochs=1,
         max_new_tokens=20,
+        temperature=1.0,           # ← Using explicit prompting + 40% bootstrap instead of high temp
         kl_penalty=0.0        # ← Set to 0.0 to disable reference policy and save ~11GB GPU memory
     )
 
@@ -1348,9 +1364,14 @@ def main(resume_from_checkpoint=None):
         evidence = "\n".join(evidence_parts)
 
         # Format as closed-book QA prompt with abstention instruction
-        prompt = f"""You are an expert at giving concise answers. Do not give any explanations, only a short answer.
+        prompt = f"""You are an expert question-answering system. Answer questions concisely with just the answer, no explanations.
 
-IMPORTANT: If you are not confident or do not know the answer, simply respond with "I don't know" rather than guessing.
+REWARD STRUCTURE - READ CAREFULLY:
+• Correct answers: You will be REWARDED
+• Saying "I don't know" when uncertain: You will be REWARDED
+• Wrong or incorrect answers: You will be PUNISHED HEAVILY
+
+IMPORTANT: Do NOT guess or make up answers! If you are uncertain or don't know, it is BETTER to say "I don't know" than to give a wrong answer. You will NOT be penalized for admitting uncertainty - in fact, you'll be rewarded for it. Wrong answers are punished much more than saying "I don't know".
 
 Question: {question}
 Answer: """

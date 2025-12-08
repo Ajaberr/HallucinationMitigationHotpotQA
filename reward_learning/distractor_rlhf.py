@@ -171,6 +171,7 @@ class RewardModelConfig:
     verifier_model: str = "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
     lambda_base: float = 0.5
     lambda_conf: float = 0.5
+    abstention_reward: float = 0.3  # Positive reward for abstentions (between 0 and correct answer)
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -189,6 +190,7 @@ class RewardModel:
         verifier_model: str = "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli",
         lambda_base: float = 0.5,
         lambda_conf: float = 0.5,
+        abstention_reward: float = 0.3,
         device: str = "cuda" if torch.cuda.is_available() else "cpu"
     ):
         # Initialize verifier
@@ -211,6 +213,7 @@ class RewardModel:
         self.device = device
         self.lambda_base = lambda_base
         self.lambda_conf = lambda_conf
+        self.abstention_reward = abstention_reward
 
     def set_vocab_size(self, vocab_size: int):
         """Set vocab size for entropy calculation (call this after policy is loaded)"""
@@ -271,6 +274,7 @@ class RewardModelTrainer:
             verifier_model=config.verifier_model,
             lambda_base=config.lambda_base,
             lambda_conf=config.lambda_conf,
+            abstention_reward=config.abstention_reward,
             device=config.device
         )
 
@@ -344,7 +348,8 @@ class RewardModelTrainer:
         torch.save({
             'config': self.config,
             'lambda_base': self.model.lambda_base,
-            'lambda_conf': self.model.lambda_conf
+            'lambda_conf': self.model.lambda_conf,
+            'abstention_reward': self.model.abstention_reward
         }, path)
         print(f"Reward config saved to {path}")
 
@@ -357,6 +362,8 @@ class RewardModelTrainer:
             self.model.lambda_base = checkpoint['lambda_base']
         if 'lambda_conf' in checkpoint:
             self.model.lambda_conf = checkpoint['lambda_conf']
+        if 'abstention_reward' in checkpoint:
+            self.model.abstention_reward = checkpoint['abstention_reward']
         print(f"Reward config loaded from {path}")
 
 
@@ -600,7 +607,9 @@ class SimpleRLTrainer:
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 max_new_tokens=self.config.max_new_tokens,
-                do_sample=False,
+                do_sample=True,  # Enable sampling for exploration (allows discovering abstention rewards)
+                temperature=self.config.temperature,
+                top_p=self.config.top_p,
                 pad_token_id=self.tokenizer.pad_token_id,
                 eos_token_id=self.tokenizer.eos_token_id,
                 return_dict_in_generate=False
@@ -672,26 +681,21 @@ class SimpleRLTrainer:
 
             reward_answer = base_reward * penalty_multiplier  # [B]
 
-            # --- APPLY ABSTENTION: R = 0 if abstained ---
+            # --- APPLY ABSTENTION: R = abstention_reward (positive, between wrong and correct) ---
+            # This creates the preference ordering: correct > abstention > wrong
+            abstention_reward_val = self.reward_model.abstention_reward
             rewards = torch.where(
                 abstained,
-                torch.zeros_like(reward_answer),
+                torch.full_like(reward_answer, abstention_reward_val),
                 reward_answer
             )
 
             # REWARD NORMALIZATION: Normalize to mean=0, std=1 for variance reduction
+            # Abstentions now maintain their positive reward relative to wrong answers
             rewards_mean = rewards.mean()
             rewards_std = rewards.std()
             if rewards_std > 1e-8:  # Avoid division by zero
                 rewards = (rewards - rewards_mean) / (rewards_std + 1e-8)
-
-            # RE-ZERO abstentions after normalization to preserve "abstention = neutral" property
-            # Otherwise normalization shifts them away from 0
-            rewards = torch.where(
-                abstained,
-                torch.zeros_like(rewards),
-                rewards
-            )
 
             # Store original stats for logging
             original_reward_mean = rewards_mean.item()
