@@ -92,7 +92,7 @@ def create_abstention_dataset():
 if __name__ == "__main__":
     create_abstention_dataset()
 
-    from datasets import load_dataset
+    # from datasets import load_dataset
 
-    dataset = load_dataset("json", data_files=f"{OUTPUT_FILE}")
-    dataset.push_to_hub("fsiddiqui2/hotpotqa-abstention-10k")
+    # dataset = load_dataset("json", data_files=f"{OUTPUT_FILE}")
+    # dataset.push_to_hub("fsiddiqui2/hotpotqa-abstention-10k")

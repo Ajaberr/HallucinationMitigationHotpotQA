@@ -82,8 +82,8 @@ def main():
     # ---------------------------------------------------------
     # EDITED: Select first 10,000 samples
     # ---------------------------------------------------------
-    print("Slicing dataset to the first 10,000 samples...")
-    dataset = dataset.select(range(10000))
+    print("Slicing dataset to the first 40,000 samples...")
+    dataset = dataset.select(range(40000))
     # ---------------------------------------------------------
     
     print(f"Loaded {len(dataset)} samples.")
