@@ -1,8 +1,9 @@
 {
-  "model": "jxrma/Qwen2.5-7B-RLHF-HotpotQA",
+  "model": "checkpoints/checkpoint_epoch_0_step_9992",
   "dataset": "hotpot_qa",
   "samples": 1000,
-  "EM": 20.200000000000003,
-  "F1": 30.01604657038869,
-  "Avg_RAUQ": 1.7431691384911536
+  "EM": 67.60000000000001,
+  "F1": 72.08075383947346,
+  "Avg_RAUQ": 1.252978422164917,
+  "Abstention_Rate": 55.900000000000006
 }

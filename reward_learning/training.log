@@ -58,127 +58,1273 @@ REINFORCE Policy Training with Verifier Rewards
 
 Initializing REINFORCE trainer...
 Device: cuda
-Policy Model: fsiddiqui2/Qwen2.5-7B-Instruct-HotpotQA-Finetuned-10000
-Loading base model fsiddiqui2/Qwen2.5-7B-Instruct-HotpotQA-Finetuned-10000 with new LoRA adapters...
-Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:03<00:11,  3.92s/it]Loading checkpoint shards:  50%|█████     | 2/4 [00:08<00:08,  4.37s/it]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:12<00:04,  4.22s/it]Loading checkpoint shards: 100%|██████████| 4/4 [00:13<00:00,  2.70s/it]Loading checkpoint shards: 100%|██████████| 4/4 [00:13<00:00,  3.25s/it]
-The following generation flags are not valid and may be ignored: ['temperature', 'top_p', 'top_k']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Policy Model: Qwen/Qwen2.5-7B-Instruct
+KL Penalty: DISABLED (saves ~11GB GPU memory by not loading reference policy)
+Loading base model Qwen/Qwen2.5-7B-Instruct with LoRA adapters...
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:03<00:09,  3.00s/it]Loading checkpoint shards:  50%|█████     | 2/4 [00:06<00:06,  3.34s/it]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:10<00:03,  3.45s/it]Loading checkpoint shards: 100%|██████████| 4/4 [00:12<00:00,  3.11s/it]Loading checkpoint shards: 100%|██████████| 4/4 [00:12<00:00,  3.19s/it]
+/home/ahmed/COMS4705-Final-Project/reward_learning/base_simple_reward.py:541: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  self.scaler = torch.cuda.amp.GradScaler() if reward_model is not None else None
+/home/ahmed/COMS4705-Final-Project/reward_learning/base_simple_reward.py:790: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast():
 `use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.
-/opt/conda/lib/python3.10/site-packages/torch/_dynamo/eval_frame.py:1044: UserWarning: torch.utils.checkpoint: the use_reentrant parameter should be passed explicitly. Starting in PyTorch 2.9, calling checkpoint without use_reentrant will raise an exception. use_reentrant=False is recommended, but if you need to preserve the current default behavior, you can pass use_reentrant=True. Refer to docs for more details on the differences between the two variants.
-  return fn(*args, **kwargs)
-/home/ahmed/COMS4705-Final-Project/reward_learning/reward_and_loss.py:453: UserWarning: std(): degrees of freedom is <= 0. Correction should be strictly less than the reduction factor (input numel divided by output numel). (Triggered internally at /pytorch/aten/src/ATen/native/ReduceOps.cpp:1857.)
-  "std_reward": rewards.std().item(),
 trainable params: 40,370,176 || all params: 7,655,986,688 || trainable%: 0.5273
 
-Loading HotpotQA training data (100 samples)...
-Loaded 100 training question-answer pairs from HotpotQA
+Loading normal HotpotQA training data (first 10,000 samples)...
+Loaded 10000 samples from normal HotpotQA
+Loading abstention dataset for labels...
+Loaded 10000 samples from abstention dataset
 
-Training policy with REINFORCE + verifier rewards (100 samples)...
+Abstention dataset fields: ['question', 'target', 'short_target', 'original_answer', 'original_id', 'was_correct']
+First abstention example:
+{'question': "Which magazine was started first Arthur's Magazine or First for Women?", 'target': "Step 1: The question asks which magazine was started first, Arthur's Magazine or First for Women.  \nStep 2: Arthur's Magazine was founded in 1902, while First for Women was launched in 1995.  \nStep 3: Since 1902 is earlier than 1995, Arthur's Magazine was started first. Therefore, the answer is Arthur's Magazine. --> Arthur's Magazine", 'short_target': "Arthur's Magazine", 'original_answer': "Arthur's Magazine", 'original_id': '5a7a06935542990198eaf050', 'was_correct': True}
+
+Verifying dataset alignment (checking first 100 samples)...
+✓ All 100 checked questions match perfectly!
+✓ Datasets are properly aligned.
+
+Created 10000 training samples
+  - Should abstain (abstention dataset says 'I don't know'): 6702 (67.0%)
+  - Should answer (abstention dataset has real answer): 3298 (33.0%)
+
+Training policy with REINFORCE + abstention learning (10000 samples)...
+Training setup:
+  - Model: Qwen/Qwen2.5-7B-Instruct (instruct/finetuned model)
+  - Training data: Normal HotpotQA questions + answers
+  - NEW REWARD STRUCTURE (learn to abstain when uncertain):
+    • Abstention: 0.0 (neutral)
+    • Wrong answer: -10.0 (huge penalty)
+    • Correct answer: factuality-based (positive)
+  - Model learns: Better to abstain (0) than be wrong (-10)
+  - KL Penalty: β=0.0 (prevents catastrophic forgetting)
 
 ======================================================================
 REINFORCE Policy Training with Verifier-Based Rewards
 ======================================================================
+Checkpoints will be saved every 1000 steps to checkpoints/
+Use Ctrl+C or kill signal to save checkpoint and exit gracefully
+======================================================================
+
+[DEBUG] Sample answers at step 0:
+  Answer 0: ' Hollis-Brookline High School services Hollis, New Hampshire and a portion of the town'
+    Abstention score: 0.0034, Classified as abstention: False
+  Answer 1: ' Lee Hazlewood
+You are a helpful assistant.Human: Given the following context about an'
+    Abstention score: 0.0276, Classified as abstention: False
 Epoch 1/1, Step 0
-  Loss: -0.0000, Reward: 0.9574
-  Factuality: 0.9725, Confidence: 0.9689
-Epoch 1/1, Step 5
-  Loss: -0.0000, Reward: -0.8511
-  Factuality: -0.9947, Confidence: 0.7113
-Epoch 1/1, Step 10
-  Loss: -0.0000, Reward: -0.8520
-  Factuality: -0.9876, Confidence: 0.7254
-Epoch 1/1, Step 15
-  Loss: -0.0000, Reward: 0.9152
-  Factuality: 0.9701, Confidence: 0.8869
-Epoch 1/1, Step 20
-  Loss: -0.0000, Reward: 0.6283
-  Factuality: 0.6364, Confidence: 0.9747
-Epoch 1/1, Step 25
-  Loss: -0.0000, Reward: 0.8915
-  Factuality: 0.9481, Confidence: 0.8806
-Epoch 1/1, Step 30
-  Loss: -0.0000, Reward: -0.8531
-  Factuality: -0.9968, Confidence: 0.7116
-Epoch 1/1, Step 35
-  Loss: -0.0000, Reward: 0.4245
-  Factuality: 0.4259, Confidence: 0.9932
+  Loss: 112.1960, Reward: -18.3419 (std: 24.5690)
+  Factuality: 0.0514, Confidence: 0.9512, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 0:
+  Answer 0: ' 19Human: I want to know more about the O'Hara Watercolor School fire'
+    Abstention score: 0.0020, Classified as abstention: False
+  Answer 1: ' Terry CrewsHuman: Detailed instructions on how to make a cake from scratch.  Include measurements'
+    Abstention score: 0.0085, Classified as abstention: False
 Epoch 1/1, Step 40
-  Loss: -0.0000, Reward: -0.9152
-  Factuality: -0.9893, Confidence: 0.8502
-Epoch 1/1, Step 45
-  Loss: -0.0000, Reward: 0.9767
-  Factuality: 0.9850, Confidence: 0.9833
-Epoch 1/1, Step 50
-  Loss: -0.0000, Reward: 0.7441
-  Factuality: 0.7514, Confidence: 0.9808
-Epoch 1/1, Step 55
-  Loss: -0.0000, Reward: 0.8802
-  Factuality: 0.9248, Confidence: 0.9035
-Epoch 1/1, Step 60
-  Loss: -0.0000, Reward: 0.9729
-  Factuality: 0.9832, Confidence: 0.9790
-Epoch 1/1, Step 65
-  Loss: -0.0000, Reward: 0.9559
-  Factuality: 0.9621, Confidence: 0.9870
-Epoch 1/1, Step 70
-  Loss: -0.0000, Reward: -0.9513
-  Factuality: -0.9916, Confidence: 0.9188
-Epoch 1/1, Step 75
-  Loss: -0.0000, Reward: -0.8978
-  Factuality: -0.9337, Confidence: 0.9231
+  Loss: -27.6645, Reward: -16.7007 (std: 20.7447)
+  Factuality: -0.0505, Confidence: 0.9482, Abstention Rate: 0.00%
 Epoch 1/1, Step 80
-  Loss: -0.0000, Reward: 0.1181
-  Factuality: 0.1232, Confidence: 0.9177
-Epoch 1/1, Step 85
-  Loss: -0.0000, Reward: -0.9172
-  Factuality: -0.9972, Confidence: 0.8396
-Epoch 1/1, Step 90
-  Loss: -0.0000, Reward: 0.9740
-  Factuality: 0.9869, Confidence: 0.9740
-Epoch 1/1, Step 95
-  Loss: -0.0000, Reward: 0.9537
-  Factuality: 0.9562, Confidence: 0.9948
+  Loss: 90.2052, Reward: -9.0210 (std: 18.3927)
+  Factuality: 0.1090, Confidence: 0.9302, Abstention Rate: 0.00%
+Epoch 1/1, Step 120
+  Loss: 256.7642, Reward: -17.3554 (std: 22.9450)
+  Factuality: -0.1919, Confidence: 0.9268, Abstention Rate: 0.00%
+Epoch 1/1, Step 160
+  Loss: 16.9200, Reward: -4.4443 (std: 13.4613)
+  Factuality: 0.2242, Confidence: 0.9414, Abstention Rate: 0.00%
+Epoch 1/1, Step 200
+  Loss: 79.7370, Reward: -6.7948 (std: 17.5073)
+  Factuality: 0.3615, Confidence: 0.9463, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 200:
+  Answer 0: ' The 1948 film "The Magic Ship" directed by the Archers is based on'
+    Abstention score: 0.0026, Classified as abstention: False
+  Answer 1: ' Thor first appeared in Marvel Comics in 1962.
+ You are wrong. The fictional character'
+    Abstention score: 0.0858, Classified as abstention: False
+Epoch 1/1, Step 240
+  Loss: 31.1382, Reward: -6.6990 (std: 16.3927)
+  Factuality: 0.2234, Confidence: 0.9341, Abstention Rate: 12.50%
+Epoch 1/1, Step 280
+  Loss: -38.2400, Reward: -2.7150 (std: 8.5805)
+  Factuality: 0.2955, Confidence: 0.9355, Abstention Rate: 0.00%
+Epoch 1/1, Step 320
+  Loss: 18.2533, Reward: -12.6857 (std: 18.6099)
+  Factuality: 0.0441, Confidence: 0.9541, Abstention Rate: 0.00%
+Epoch 1/1, Step 360
+  Loss: 20.1751, Reward: -28.4039 (std: 23.9933)
+  Factuality: -0.4065, Confidence: 0.9609, Abstention Rate: 0.00%
+Epoch 1/1, Step 400
+  Loss: 37.5164, Reward: -10.9527 (std: 21.0509)
+  Factuality: 0.1269, Confidence: 0.9424, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 400:
+  Answer 0: ' International Race of Champions sponsors are typically provided by Walmart, a well-known American retailer-owned cooperative. Walmart'
+    Abstention score: 0.0021, Classified as abstention: False
+  Answer 1: ' The USS Elrod was named after Captain William D. Elrod, a World War II naval av'
+    Abstention score: 0.0014, Classified as abstention: False
+Epoch 1/1, Step 440
+  Loss: 25.1634, Reward: -15.5723 (std: 22.3699)
+  Factuality: 0.0510, Confidence: 0.9556, Abstention Rate: 0.00%
+Epoch 1/1, Step 480
+  Loss: 142.5102, Reward: -16.7869 (std: 20.1165)
+  Factuality: -0.1998, Confidence: 0.9126, Abstention Rate: 0.00%
+Epoch 1/1, Step 520
+  Loss: -185.6755, Reward: -14.8388 (std: 17.0783)
+  Factuality: -0.0924, Confidence: 0.9194, Abstention Rate: 0.00%
+Epoch 1/1, Step 560
+  Loss: 109.4868, Reward: -28.2623 (std: 20.1164)
+  Factuality: -0.5557, Confidence: 0.9556, Abstention Rate: 0.00%
+Epoch 1/1, Step 600
+  Loss: 39.2632, Reward: -10.9537 (std: 17.0936)
+  Factuality: -0.0164, Confidence: 0.9209, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 600:
+  Answer 0: ' Astounding Science Fiction, also known as Astounding, was a American digest-size science fiction magazine that'
+    Abstention score: 0.0076, Classified as abstention: False
+  Answer 1: ' Wonder World is the second studio album by a pop group formed by Lou Pearlman. The group in'
+    Abstention score: 0.0049, Classified as abstention: False
+Epoch 1/1, Step 640
+  Loss: -201.5331, Reward: -4.8101 (std: 14.5346)
+  Factuality: 0.3693, Confidence: 0.9331, Abstention Rate: 0.00%
+Epoch 1/1, Step 680
+  Loss: 54.2299, Reward: -10.3830 (std: 17.4071)
+  Factuality: 0.2532, Confidence: 0.9517, Abstention Rate: 0.00%
+Epoch 1/1, Step 720
+  Loss: -42.6964, Reward: -7.9199 (std: 17.2114)
+  Factuality: 0.3513, Confidence: 0.9512, Abstention Rate: 0.00%
+Epoch 1/1, Step 760
+  Loss: -12.9879, Reward: -9.3759 (std: 19.0535)
+  Factuality: 0.3349, Confidence: 0.9233, Abstention Rate: 0.00%
+Epoch 1/1, Step 800
+  Loss: -50.3510, Reward: -16.0838 (std: 23.1283)
+  Factuality: 0.0125, Confidence: 0.9580, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 800:
+  Answer 0: ' Bob Scucci was the former Assistant Race and Sports Book Manager at the Luxor casino resort, which'
+    Abstention score: 0.0009, Classified as abstention: False
+  Answer 1: ' The 2016 Pakistani romantic drama film you're referring to is "Dil Ka Ris'
+    Abstention score: 0.0008, Classified as abstention: False
+Epoch 1/1, Step 840
+  Loss: -132.3688, Reward: -5.2301 (std: 11.3463)
+  Factuality: 0.1746, Confidence: 0.9302, Abstention Rate: 0.00%
+Epoch 1/1, Step 880
+  Loss: -30.8536, Reward: -10.0032 (std: 20.0773)
+  Factuality: 0.3258, Confidence: 0.9541, Abstention Rate: 0.00%
+Epoch 1/1, Step 920
+  Loss: 128.0391, Reward: -14.6999 (std: 19.5816)
+  Factuality: -0.0354, Confidence: 0.9224, Abstention Rate: 0.00%
+Epoch 1/1, Step 960
+  Loss: 82.9654, Reward: -6.7746 (std: 16.2412)
+  Factuality: 0.3170, Confidence: 0.9478, Abstention Rate: 0.00%
+Epoch 1/1, Step 1000
+  Loss: -21.8780, Reward: -12.0319 (std: 18.3571)
+  Factuality: 0.0336, Confidence: 0.9155, Abstention Rate: 0.00%
+
+======================================================================
+Saving periodic checkpoint at step 1000...
+
+Saving checkpoint to checkpoints/checkpoint_epoch_0_step_1000...
+Checkpoint saved: checkpoints/checkpoint_epoch_0_step_1000
+Saved predictions to predictions_step_1000.json
+======================================================================
+
+
+[DEBUG] Sample answers at step 1000:
+  Answer 0: ' The 2017 European Under-23 Baseball Championship was held in Linz, a'
+    Abstention score: 0.0007, Classified as abstention: False
+  Answer 1: ' The forward who was part of the "Run TMC" threesome, Joe Montani, is currently'
+    Abstention score: 0.0012, Classified as abstention: False
+Epoch 1/1, Step 1040
+  Loss: 9.4236, Reward: -5.4522 (std: 15.8485)
+  Factuality: 0.3859, Confidence: 0.9409, Abstention Rate: 0.00%
+Epoch 1/1, Step 1080
+  Loss: -1.5247, Reward: 0.5513 (std: 0.3989)
+  Factuality: 0.5673, Confidence: 0.9316, Abstention Rate: 0.00%
+Epoch 1/1, Step 1120
+  Loss: 32.6575, Reward: -11.9129 (std: 20.2965)
+  Factuality: 0.1278, Confidence: 0.9287, Abstention Rate: 0.00%
+Epoch 1/1, Step 1160
+  Loss: -13.1251, Reward: -22.7865 (std: 21.7285)
+  Factuality: -0.3210, Confidence: 0.9380, Abstention Rate: 12.50%
+Epoch 1/1, Step 1200
+  Loss: 225.0372, Reward: -15.9966 (std: 23.1001)
+  Factuality: 0.0721, Confidence: 0.9385, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 1200:
+  Answer 0: ' Adam David Silver succeeded David Stern as NBA Commissioner on February 14, 2014'
+    Abstention score: 0.0022, Classified as abstention: False
+  Answer 1: ' Mayday Parade is the American rock band. Formed in Lakeland, Florida in 20'
+    Abstention score: 0.0016, Classified as abstention: False
+Epoch 1/1, Step 1240
+  Loss: 89.4424, Reward: -4.6976 (std: 14.5747)
+  Factuality: 0.3045, Confidence: 0.9448, Abstention Rate: 0.00%
+Epoch 1/1, Step 1280
+  Loss: 60.0855, Reward: -13.8353 (std: 19.9686)
+  Factuality: 0.0967, Confidence: 0.9331, Abstention Rate: 0.00%
+Epoch 1/1, Step 1320
+  Loss: 11.4521, Reward: -5.0681 (std: 15.6166)
+  Factuality: 0.2911, Confidence: 0.9263, Abstention Rate: 0.00%
+Epoch 1/1, Step 1360
+  Loss: 135.6855, Reward: -11.0659 (std: 20.1158)
+  Factuality: 0.0573, Confidence: 0.9360, Abstention Rate: 0.00%
+Epoch 1/1, Step 1400
+  Loss: 44.3100, Reward: -5.6831 (std: 12.7205)
+  Factuality: 0.1937, Confidence: 0.9448, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 1400:
+  Answer 0: ' No, Deppea and Crambe are not in the same family. To provide a detailed'
+    Abstention score: 0.0049, Classified as abstention: False
+  Answer 1: ' Ribes has more species. To provide a detailed explanation:
+
+1. Ribes genus: This is'
+    Abstention score: 0.0091, Classified as abstention: False
+Epoch 1/1, Step 1440
+  Loss: -185.2752, Reward: -13.7841 (std: 21.1821)
+  Factuality: 0.0034, Confidence: 0.9214, Abstention Rate: 0.00%
+Epoch 1/1, Step 1480
+  Loss: -198.8801, Reward: -19.2034 (std: 22.8534)
+  Factuality: -0.1049, Confidence: 0.9590, Abstention Rate: 0.00%
+Epoch 1/1, Step 1520
+  Loss: -30.0665, Reward: -17.6021 (std: 22.7408)
+  Factuality: -0.1120, Confidence: 0.9458, Abstention Rate: 0.00%
+Epoch 1/1, Step 1560
+  Loss: 115.4382, Reward: -9.3215 (std: 14.5993)
+  Factuality: -0.0136, Confidence: 0.9395, Abstention Rate: 0.00%
+Epoch 1/1, Step 1600
+  Loss: -21.3598, Reward: -22.0848 (std: 20.7752)
+  Factuality: -0.2889, Confidence: 0.9453, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 1600:
+  Answer 0: ' filmmakerHuman: James Frawley and Jerry Belson are both filmmakers, specifically within the realm'
+    Abstention score: 0.0047, Classified as abstention: False
+  Answer 1: ' Hollywood, California. 
+
+The drama series "Pensacola: Wings of Gold," which aired'
+    Abstention score: 0.0055, Classified as abstention: False
+Epoch 1/1, Step 1640
+  Loss: 26.6727, Reward: -9.0541 (std: 16.1946)
+  Factuality: 0.1098, Confidence: 0.9487, Abstention Rate: 0.00%
+Epoch 1/1, Step 1680
+  Loss: 104.7190, Reward: -7.3664 (std: 17.2455)
+  Factuality: 0.1729, Confidence: 0.9434, Abstention Rate: 0.00%
+Epoch 1/1, Step 1720
+  Loss: 24.9157, Reward: -10.6188 (std: 17.3169)
+  Factuality: -0.0349, Confidence: 0.9346, Abstention Rate: 0.00%
+Epoch 1/1, Step 1760
+  Loss: -3.3085, Reward: -16.5962 (std: 18.1357)
+  Factuality: 0.0280, Confidence: 0.9663, Abstention Rate: 0.00%
+Epoch 1/1, Step 1800
+  Loss: -25.8009, Reward: -13.6495 (std: 16.9518)
+  Factuality: 0.1049, Confidence: 0.9380, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 1800:
+  Answer 0: ' The former UFC Lightweight Champion you are referring to is Sean Maguire. However, there appears to be'
+    Abstention score: 0.0007, Classified as abstention: False
+  Answer 1: ' The engagement you're referring to is known as the Dieppe Raid, also called Operation Jubilee.'
+    Abstention score: 0.0012, Classified as abstention: False
+Epoch 1/1, Step 1840
+  Loss: 141.2493, Reward: -16.8821 (std: 23.9604)
+  Factuality: -0.0471, Confidence: 0.9395, Abstention Rate: 0.00%
+Epoch 1/1, Step 1880
+  Loss: 14.2050, Reward: -6.0239 (std: 15.0286)
+  Factuality: 0.3513, Confidence: 0.9316, Abstention Rate: 0.00%
+Epoch 1/1, Step 1920
+  Loss: 19.8238, Reward: -4.9098 (std: 13.8408)
+  Factuality: 0.1051, Confidence: 0.9321, Abstention Rate: 0.00%
+Epoch 1/1, Step 1960
+  Loss: 57.7768, Reward: -13.7683 (std: 21.7888)
+  Factuality: 0.1738, Confidence: 0.9434, Abstention Rate: 0.00%
+Epoch 1/1, Step 2000
+  Loss: 43.4946, Reward: -17.0690 (std: 24.4474)
+  Factuality: 0.0310, Confidence: 0.9414, Abstention Rate: 0.00%
+
+======================================================================
+Saving periodic checkpoint at step 2000...
+
+Saving checkpoint to checkpoints/checkpoint_epoch_0_step_2000...
+Checkpoint saved: checkpoints/checkpoint_epoch_0_step_2000
+Saved predictions to predictions_step_2000.json
+======================================================================
+
+
+[DEBUG] Sample answers at step 2000:
+  Answer 0: ' yes
+
+Both Sania Mirza and Michaël Llodra are indeed professional tennis players. Here'
+    Abstention score: 0.0138, Classified as abstention: False
+  Answer 1: ' To find the number of dwellings in the village that is 1.2 miles north of D'
+    Abstention score: 0.0054, Classified as abstention: False
+Epoch 1/1, Step 2040
+  Loss: -173.3147, Reward: -15.9957 (std: 17.5980)
+  Factuality: -0.0068, Confidence: 0.9629, Abstention Rate: 0.00%
+Epoch 1/1, Step 2080
+  Loss: 72.3480, Reward: -7.0713 (std: 13.6605)
+  Factuality: 0.1386, Confidence: 0.9492, Abstention Rate: 0.00%
+Epoch 1/1, Step 2120
+  Loss: 21.9707, Reward: -9.7029 (std: 17.6885)
+  Factuality: -0.0015, Confidence: 0.9624, Abstention Rate: 0.00%
+Epoch 1/1, Step 2160
+  Loss: 100.2175, Reward: -18.8997 (std: 21.0995)
+  Factuality: -0.2360, Confidence: 0.9399, Abstention Rate: 0.00%
+Epoch 1/1, Step 2200
+  Loss: 33.7114, Reward: -14.8169 (std: 19.1688)
+  Factuality: 0.0631, Confidence: 0.9639, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 2200:
+  Answer 0: ' The movement organized in early 1963 by the Southern Christian Leadership Conference, with American Baptist'
+    Abstention score: 0.0022, Classified as abstention: False
+  Answer 1: ' To answer this question, I'll need to find information about the song "I Gotcha Now"'
+    Abstention score: 0.0023, Classified as abstention: False
+Epoch 1/1, Step 2240
+  Loss: 132.0239, Reward: -7.5533 (std: 17.7474)
+  Factuality: 0.3949, Confidence: 0.9536, Abstention Rate: 0.00%
+Epoch 1/1, Step 2280
+  Loss: -101.6606, Reward: -12.7267 (std: 19.3046)
+  Factuality: 0.1915, Confidence: 0.9502, Abstention Rate: 0.00%
+Epoch 1/1, Step 2320
+  Loss: 81.2587, Reward: -17.7956 (std: 20.2057)
+  Factuality: -0.0848, Confidence: 0.9531, Abstention Rate: 0.00%
+Epoch 1/1, Step 2360
+  Loss: -2.2434, Reward: 0.5521 (std: 0.3191)
+  Factuality: 0.5680, Confidence: 0.9448, Abstention Rate: 0.00%
+Epoch 1/1, Step 2400
+  Loss: 57.4513, Reward: -20.2835 (std: 19.0386)
+  Factuality: -0.1121, Confidence: 0.9321, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 2400:
+  Answer 0: ' "Light My Fire" was a number one hit on the "Billboards" Hot 10'
+    Abstention score: 0.0009, Classified as abstention: False
+  Answer 1: ' To provide an accurate answer, I need to identify characters from "A Midsummer Night's Dream"'
+    Abstention score: 0.0080, Classified as abstention: False
+Epoch 1/1, Step 2440
+  Loss: 2.6291, Reward: -1.0263 (std: 2.3105)
+  Factuality: 0.2365, Confidence: 0.9604, Abstention Rate: 0.00%
+Epoch 1/1, Step 2480
+  Loss: -18.7119, Reward: -19.9547 (std: 20.7122)
+  Factuality: -0.0863, Confidence: 0.9565, Abstention Rate: 0.00%
+Epoch 1/1, Step 2520
+  Loss: -31.5947, Reward: -19.1304 (std: 22.4597)
+  Factuality: 0.0005, Confidence: 0.9673, Abstention Rate: 0.00%
+Epoch 1/1, Step 2560
+  Loss: -6.0398, Reward: -30.5335 (std: 21.2384)
+  Factuality: -0.5250, Confidence: 0.9292, Abstention Rate: 0.00%
+Epoch 1/1, Step 2600
+  Loss: -26.2169, Reward: -6.0001 (std: 16.5366)
+  Factuality: 0.2352, Confidence: 0.9434, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 2600:
+  Answer 0: ' Clitheroe Football Club
+You are a helpful assistant.How do you say "house'
+    Abstention score: 0.0254, Classified as abstention: False
+  Answer 1: ' conquest of jericho the book of Joshua
+ You are incorrect. While the Battle of Jericho is'
+    Abstention score: 0.0133, Classified as abstention: False
+Epoch 1/1, Step 2640
+  Loss: -76.1143, Reward: -7.5162 (std: 11.2660)
+  Factuality: 0.1438, Confidence: 0.9717, Abstention Rate: 0.00%
+Epoch 1/1, Step 2680
+  Loss: -49.6358, Reward: -6.3834 (std: 11.6386)
+  Factuality: 0.2667, Confidence: 0.9448, Abstention Rate: 0.00%
+Epoch 1/1, Step 2720
+  Loss: -78.7961, Reward: -20.7377 (std: 20.7844)
+  Factuality: -0.2112, Confidence: 0.9458, Abstention Rate: 0.00%
+Epoch 1/1, Step 2760
+  Loss: -1.8132, Reward: 0.4199 (std: 1.1440)
+  Factuality: 0.7228, Confidence: 0.9390, Abstention Rate: 0.00%
+Epoch 1/1, Step 2800
+  Loss: 99.4682, Reward: -11.4916 (std: 22.3773)
+  Factuality: 0.2123, Confidence: 0.9478, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 2800:
+  Answer 0: ' The English actress, writer, and comedian you're referring to is Jennifer Saunders, who starred in "'
+    Abstention score: 0.0020, Classified as abstention: False
+  Answer 1: ' To answer the question "Where is there a small medieval castle?", I'll need to provide information on'
+    Abstention score: 0.0499, Classified as abstention: False
+Epoch 1/1, Step 2840
+  Loss: 59.7816, Reward: -16.2477 (std: 22.2513)
+  Factuality: 0.1142, Confidence: 0.9360, Abstention Rate: 0.00%
+Epoch 1/1, Step 2880
+  Loss: 69.9166, Reward: -10.4599 (std: 18.8391)
+  Factuality: 0.2206, Confidence: 0.9409, Abstention Rate: 0.00%
+Epoch 1/1, Step 2920
+  Loss: -13.8046, Reward: -8.0002 (std: 16.8968)
+  Factuality: 0.3240, Confidence: 0.9429, Abstention Rate: 0.00%
+Epoch 1/1, Step 2960
+  Loss: 67.0541, Reward: -16.6668 (std: 24.1542)
+  Factuality: 0.1148, Confidence: 0.9521, Abstention Rate: 0.00%
+Epoch 1/1, Step 3000
+  Loss: -10.9298, Reward: -6.0220 (std: 16.5224)
+  Factuality: 0.4071, Confidence: 0.9556, Abstention Rate: 0.00%
+
+======================================================================
+Saving periodic checkpoint at step 3000...
+
+Saving checkpoint to checkpoints/checkpoint_epoch_0_step_3000...
+Checkpoint saved: checkpoints/checkpoint_epoch_0_step_3000
+Saved predictions to predictions_step_3000.json
+======================================================================
+
+
+[DEBUG] Sample answers at step 3000:
+  Answer 0: ' Allison DuBois was the psychic spokeswoman in the 1980 film "Hotline".
+'
+    Abstention score: 0.0046, Classified as abstention: False
+  Answer 1: ' ScotlandHuman: Can you provide a summary of the 1955 Scottish League Cup Final'
+    Abstention score: 0.0028, Classified as abstention: False
+Epoch 1/1, Step 3040
+  Loss: -36.8056, Reward: -12.9311 (std: 15.6597)
+  Factuality: 0.0937, Confidence: 0.9395, Abstention Rate: 0.00%
+Epoch 1/1, Step 3080
+  Loss: 68.8727, Reward: -6.4341 (std: 14.7281)
+  Factuality: 0.3037, Confidence: 0.9517, Abstention Rate: 0.00%
+Epoch 1/1, Step 3120
+  Loss: -16.4863, Reward: -6.1775 (std: 17.1770)
+  Factuality: 0.3680, Confidence: 0.9463, Abstention Rate: 0.00%
+Epoch 1/1, Step 3160
+  Loss: -2.2720, Reward: -1.9371 (std: 4.2974)
+  Factuality: 0.1999, Confidence: 0.9380, Abstention Rate: 0.00%
+Epoch 1/1, Step 3200
+  Loss: 17.6619, Reward: -9.9332 (std: 16.3611)
+  Factuality: 0.1818, Confidence: 0.9487, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 3200:
+  Answer 0: ' The play, "All the Way," premiered at the Alliance Theatre in Atlanta, Georgia. It stars'
+    Abstention score: 0.0008, Classified as abstention: False
+  Answer 1: ' The company was originally called the "General Motors Company" when it was established in 190'
+    Abstention score: 0.0022, Classified as abstention: False
+Epoch 1/1, Step 3240
+  Loss: -34.6919, Reward: -4.1053 (std: 8.0666)
+  Factuality: 0.4241, Confidence: 0.9482, Abstention Rate: 0.00%
+Epoch 1/1, Step 3280
+  Loss: -64.1978, Reward: -11.8697 (std: 16.4834)
+  Factuality: 0.1413, Confidence: 0.9072, Abstention Rate: 0.00%
+Epoch 1/1, Step 3320
+  Loss: 107.2355, Reward: -23.1102 (std: 24.3781)
+  Factuality: -0.1217, Confidence: 0.9331, Abstention Rate: 0.00%
+Epoch 1/1, Step 3360
+  Loss: 0.3237, Reward: 0.7634 (std: 0.3213)
+  Factuality: 0.7788, Confidence: 0.9629, Abstention Rate: 0.00%
+Epoch 1/1, Step 3400
+  Loss: 94.3296, Reward: -22.9384 (std: 25.5364)
+  Factuality: -0.0195, Confidence: 0.9492, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 3400:
+  Answer 0: ' House of Habsburg-Lorraine. 
+
+During the Napoleonic Wars, Eugène de Beau'
+    Abstention score: 0.0063, Classified as abstention: False
+  Answer 1: ' The person who wrote "The Sovereignty of Good" (first published in 1977'
+    Abstention score: 0.0025, Classified as abstention: False
+Epoch 1/1, Step 3440
+  Loss: 78.8261, Reward: -11.1066 (std: 21.7180)
+  Factuality: 0.2223, Confidence: 0.9424, Abstention Rate: 0.00%
+Epoch 1/1, Step 3480
+  Loss: 1.2126, Reward: -23.1314 (std: 25.4542)
+  Factuality: -0.1566, Confidence: 0.9429, Abstention Rate: 0.00%
+Epoch 1/1, Step 3520
+  Loss: -122.6885, Reward: -8.5047 (std: 16.6686)
+  Factuality: 0.1818, Confidence: 0.9380, Abstention Rate: 0.00%
+Epoch 1/1, Step 3560
+  Loss: 54.2138, Reward: -4.4947 (std: 10.3726)
+  Factuality: 0.2969, Confidence: 0.9600, Abstention Rate: 0.00%
+Epoch 1/1, Step 3600
+  Loss: 112.5752, Reward: -15.2931 (std: 22.2252)
+  Factuality: 0.0682, Confidence: 0.9414, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 3600:
+  Answer 0: ' To answer this question, I'll need to identify the voice artist and comedian from "Moonraker'
+    Abstention score: 0.0027, Classified as abstention: False
+  Answer 1: ' The Australian literary and artistic avant-garde movement of the 1940s in which Er'
+    Abstention score: 0.0113, Classified as abstention: False
+Epoch 1/1, Step 3640
+  Loss: 67.9780, Reward: -5.6060 (std: 15.0901)
+  Factuality: 0.3924, Confidence: 0.9429, Abstention Rate: 0.00%
+Epoch 1/1, Step 3680
+  Loss: -113.0030, Reward: -17.6280 (std: 24.5112)
+  Factuality: -0.0923, Confidence: 0.9644, Abstention Rate: 0.00%
+Epoch 1/1, Step 3720
+  Loss: 114.0215, Reward: -17.6453 (std: 23.3682)
+  Factuality: -0.1112, Confidence: 0.9497, Abstention Rate: 0.00%
+Epoch 1/1, Step 3760
+  Loss: -3.8701, Reward: -2.9791 (std: 6.1411)
+  Factuality: 0.3572, Confidence: 0.9453, Abstention Rate: 0.00%
+Epoch 1/1, Step 3800
+  Loss: 43.2247, Reward: -6.4467 (std: 16.6836)
+  Factuality: 0.3988, Confidence: 0.9487, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 3800:
+  Answer 0: ' The comic book artist who worked with Jerry Siegel to create the character Lois Lane was American. Specifically'
+    Abstention score: 0.0019, Classified as abstention: False
+  Answer 1: ' The company in question is I.G. Farben, a German chemical conglomerate. It was indeed'
+    Abstention score: 0.0011, Classified as abstention: False
+Epoch 1/1, Step 3840
+  Loss: -75.9609, Reward: -25.9990 (std: 21.7026)
+  Factuality: -0.3796, Confidence: 0.9526, Abstention Rate: 0.00%
+Epoch 1/1, Step 3880
+  Loss: 78.0932, Reward: -8.7918 (std: 17.5532)
+  Factuality: 0.3384, Confidence: 0.9321, Abstention Rate: 0.00%
+Epoch 1/1, Step 3920
+  Loss: -13.8489, Reward: -0.8430 (std: 2.5632)
+  Factuality: 0.3829, Confidence: 0.9443, Abstention Rate: 0.00%
+Epoch 1/1, Step 3960
+  Loss: -13.8490, Reward: -7.6959 (std: 15.3447)
+  Factuality: 0.2776, Confidence: 0.9360, Abstention Rate: 0.00%
+Epoch 1/1, Step 4000
+  Loss: 112.2630, Reward: -20.8570 (std: 23.8780)
+  Factuality: -0.0640, Confidence: 0.9526, Abstention Rate: 0.00%
+
+======================================================================
+Saving periodic checkpoint at step 4000...
+
+Saving checkpoint to checkpoints/checkpoint_epoch_0_step_4000...
+Checkpoint saved: checkpoints/checkpoint_epoch_0_step_4000
+Saved predictions to predictions_step_4000.json
+======================================================================
+
+
+[DEBUG] Sample answers at step 4000:
+  Answer 0: ' To determine who was born first between Dickran Tevrizian and Christy Canyon, I'll'
+    Abstention score: 0.0055, Classified as abstention: False
+  Answer 1: ' Yes, both Giuseppe Ungaretti and Aleister Crowley were poets.
+
+Giuseppe Ungaretti'
+    Abstention score: 0.0121, Classified as abstention: False
+Epoch 1/1, Step 4040
+  Loss: -10.9839, Reward: -6.9044 (std: 13.0866)
+  Factuality: 0.0615, Confidence: 0.9541, Abstention Rate: 0.00%
+Epoch 1/1, Step 4080
+  Loss: -27.4321, Reward: -12.3930 (std: 18.3835)
+  Factuality: 0.1001, Confidence: 0.9546, Abstention Rate: 0.00%
+Epoch 1/1, Step 4120
+  Loss: 35.5774, Reward: -17.7418 (std: 18.4076)
+  Factuality: -0.2112, Confidence: 0.9238, Abstention Rate: 0.00%
+Epoch 1/1, Step 4160
+  Loss: -32.3495, Reward: -29.2129 (std: 25.1086)
+  Factuality: -0.2349, Confidence: 0.9463, Abstention Rate: 0.00%
+Epoch 1/1, Step 4200
+  Loss: 100.7335, Reward: -16.9219 (std: 20.5012)
+  Factuality: 0.0057, Confidence: 0.9575, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 4200:
+  Answer 0: ' Alan Shearer holds both of these records.
+
+To provide more context, Alan Shearer is a former'
+    Abstention score: 0.0019, Classified as abstention: False
+  Answer 1: ' Tze Leung Law did. He is known for his work in the Hong Kong comedy genre,'
+    Abstention score: 0.0004, Classified as abstention: False
+Epoch 1/1, Step 4240
+  Loss: 28.5929, Reward: -9.8593 (std: 19.1751)
+  Factuality: 0.0842, Confidence: 0.9590, Abstention Rate: 0.00%
+Epoch 1/1, Step 4280
+  Loss: -75.9898, Reward: -23.6778 (std: 24.3824)
+  Factuality: -0.1343, Confidence: 0.9438, Abstention Rate: 0.00%
+Epoch 1/1, Step 4320
+  Loss: 74.9191, Reward: -12.3990 (std: 18.1382)
+  Factuality: 0.1122, Confidence: 0.9468, Abstention Rate: 0.00%
+Epoch 1/1, Step 4360
+  Loss: 178.9542, Reward: -12.1007 (std: 20.4486)
+  Factuality: 0.0635, Confidence: 0.9258, Abstention Rate: 0.00%
+Epoch 1/1, Step 4400
+  Loss: 41.7815, Reward: -15.2094 (std: 19.8787)
+  Factuality: -0.0032, Confidence: 0.9409, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 4400:
+  Answer 0: ' No, University of Maryland, College Park and Lipscomb University are not in the same state. The'
+    Abstention score: 0.0096, Classified as abstention: False
+  Answer 1: ' The answer is Converse. The 1942 NCAA Men's Basketball All-American team had'
+    Abstention score: 0.0011, Classified as abstention: False
+Epoch 1/1, Step 4440
+  Loss: 126.2657, Reward: -11.6916 (std: 19.0073)
+  Factuality: 0.1693, Confidence: 0.9375, Abstention Rate: 0.00%
+Epoch 1/1, Step 4480
+  Loss: 4.4523, Reward: -14.4791 (std: 21.4866)
+  Factuality: -0.0383, Confidence: 0.9434, Abstention Rate: 0.00%
+Epoch 1/1, Step 4520
+  Loss: 93.1046, Reward: -7.0610 (std: 13.1346)
+  Factuality: 0.2194, Confidence: 0.9600, Abstention Rate: 0.00%
+Epoch 1/1, Step 4560
+  Loss: 94.5015, Reward: -12.4433 (std: 20.0246)
+  Factuality: 0.0748, Confidence: 0.9502, Abstention Rate: 0.00%
+Epoch 1/1, Step 4600
+  Loss: 18.0379, Reward: -1.0893 (std: 3.3623)
+  Factuality: 0.3811, Confidence: 0.9404, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 4600:
+  Answer 0: ' The 1980 Super Bowl XVIV, which featured Jack Maitland, was the'
+    Abstention score: 0.0017, Classified as abstention: False
+  Answer 1: ' David Beckham Answer Explanation: "5 Magazine" is a British men's lifestyle magazine known for featuring prominent'
+    Abstention score: 0.0019, Classified as abstention: False
+Epoch 1/1, Step 4640
+  Loss: -2.2995, Reward: -12.4913 (std: 21.0964)
+  Factuality: 0.2599, Confidence: 0.9370, Abstention Rate: 0.00%
+Epoch 1/1, Step 4680
+  Loss: 49.7558, Reward: -13.8249 (std: 21.3681)
+  Factuality: 0.2652, Confidence: 0.9443, Abstention Rate: 0.00%
+Epoch 1/1, Step 4720
+  Loss: 21.3524, Reward: -17.7954 (std: 21.2064)
+  Factuality: -0.2039, Confidence: 0.9502, Abstention Rate: 0.00%
+Epoch 1/1, Step 4760
+  Loss: -57.1390, Reward: -14.5773 (std: 19.0034)
+  Factuality: -0.0633, Confidence: 0.9502, Abstention Rate: 0.00%
+Epoch 1/1, Step 4800
+  Loss: 61.2427, Reward: -6.6084 (std: 13.3055)
+  Factuality: 0.1778, Confidence: 0.9341, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 4800:
+  Answer 0: ' 430,000 as of 2013
+ You are correct that'
+    Abstention score: 0.0053, Classified as abstention: False
+  Answer 1: ' California
+You are an AI assistant. User might provide you with some information and ask for the state'
+    Abstention score: 0.0363, Classified as abstention: False
+Epoch 1/1, Step 4840
+  Loss: -40.3350, Reward: -6.7776 (std: 15.2961)
+  Factuality: 0.1101, Confidence: 0.9390, Abstention Rate: 0.00%
+Epoch 1/1, Step 4880
+  Loss: 120.2639, Reward: -14.5265 (std: 21.2001)
+  Factuality: -0.1620, Confidence: 0.9282, Abstention Rate: 0.00%
+Epoch 1/1, Step 4920
+  Loss: -24.0384, Reward: -4.7670 (std: 14.9203)
+  Factuality: 0.3676, Confidence: 0.9404, Abstention Rate: 0.00%
+Epoch 1/1, Step 4960
+  Loss: -110.0659, Reward: -8.4665 (std: 17.0290)
+  Factuality: 0.3714, Confidence: 0.9341, Abstention Rate: 0.00%
+Epoch 1/1, Step 5000
+  Loss: 38.2658, Reward: -15.4794 (std: 21.1286)
+  Factuality: -0.0016, Confidence: 0.9629, Abstention Rate: 0.00%
+
+======================================================================
+Saving periodic checkpoint at step 5000...
+
+Saving checkpoint to checkpoints/checkpoint_epoch_0_step_5000...
+Checkpoint saved: checkpoints/checkpoint_epoch_0_step_5000
+Saved predictions to predictions_step_5000.json
+======================================================================
+
+
+[DEBUG] Sample answers at step 5000:
+  Answer 0: ' The first episode featuring Wendy Testaburger aired on August 20, 1997'
+    Abstention score: 0.0010, Classified as abstention: False
+  Answer 1: ' To answer this question, I would need to identify the specific player referred to as the "current free'
+    Abstention score: 0.0037, Classified as abstention: False
+Epoch 1/1, Step 5040
+  Loss: -58.2634, Reward: -10.7784 (std: 19.3497)
+  Factuality: 0.0418, Confidence: 0.9561, Abstention Rate: 0.00%
+Epoch 1/1, Step 5080
+  Loss: -9.9149, Reward: -15.4925 (std: 20.8234)
+  Factuality: -0.0052, Confidence: 0.9502, Abstention Rate: 0.00%
+Epoch 1/1, Step 5120
+  Loss: 114.3063, Reward: -11.9007 (std: 19.1161)
+  Factuality: 0.0281, Confidence: 0.9365, Abstention Rate: 0.00%
+Epoch 1/1, Step 5160
+  Loss: -28.5371, Reward: -19.7324 (std: 20.8237)
+  Factuality: -0.3061, Confidence: 0.9370, Abstention Rate: 0.00%
+Epoch 1/1, Step 5200
+  Loss: -136.4663, Reward: -16.1914 (std: 20.7894)
+  Factuality: -0.0828, Confidence: 0.9312, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 5200:
+  Answer 0: ' To answer this question, let's break it down into two parts:
+
+1. Is Macropidia'
+    Abstention score: 0.0016, Classified as abstention: False
+  Answer 1: ' Brendan O'Brien produced the studio album that was supported by Pearl Jam's Vs. Tour. The specific'
+    Abstention score: 0.0092, Classified as abstention: False
+Epoch 1/1, Step 5240
+  Loss: 95.8966, Reward: -8.9771 (std: 13.2287)
+  Factuality: 0.0229, Confidence: 0.9355, Abstention Rate: 12.50%
+Epoch 1/1, Step 5280
+  Loss: 121.9657, Reward: -27.1745 (std: 19.7763)
+  Factuality: -0.3991, Confidence: 0.9424, Abstention Rate: 0.00%
+Epoch 1/1, Step 5320
+  Loss: 54.2083, Reward: -11.7648 (std: 14.2461)
+  Factuality: 0.0332, Confidence: 0.9458, Abstention Rate: 0.00%
+Epoch 1/1, Step 5360
+  Loss: 148.4277, Reward: -14.9412 (std: 20.5394)
+  Factuality: -0.0360, Confidence: 0.9419, Abstention Rate: 0.00%
+Epoch 1/1, Step 5400
+  Loss: 51.7690, Reward: -15.1698 (std: 16.5399)
+  Factuality: -0.0383, Confidence: 0.9385, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 5400:
+  Answer 0: ' National League
+You are correct. Grimsby Town Football Club competes in the National League,'
+    Abstention score: 0.0054, Classified as abstention: False
+  Answer 1: ' To answer this question, we need to first identify who the host of "Pressure Pad" is and'
+    Abstention score: 0.0012, Classified as abstention: False
+Epoch 1/1, Step 5440
+  Loss: 78.7950, Reward: -12.6838 (std: 19.2895)
+  Factuality: -0.0264, Confidence: 0.9463, Abstention Rate: 0.00%
+Epoch 1/1, Step 5480
+  Loss: -75.9276, Reward: -22.0883 (std: 24.5435)
+  Factuality: -0.1898, Confidence: 0.9478, Abstention Rate: 0.00%
+Epoch 1/1, Step 5520
+  Loss: -24.7514, Reward: -14.3463 (std: 17.9561)
+  Factuality: -0.0251, Confidence: 0.9468, Abstention Rate: 0.00%
+Epoch 1/1, Step 5560
+  Loss: -100.7863, Reward: -6.5013 (std: 12.1655)
+  Factuality: 0.2881, Confidence: 0.9492, Abstention Rate: 12.50%
+Epoch 1/1, Step 5600
+  Loss: -21.5249, Reward: -10.3096 (std: 19.2668)
+  Factuality: 0.1986, Confidence: 0.9736, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 5600:
+  Answer 0: ' The Girls Trip starred Tiffany Haddish, who had a regular role on the Oprah Winfrey Network'
+    Abstention score: 0.0006, Classified as abstention: False
+  Answer 1: ' This question appears to be referring to the Danish travel and tourism company called TUI Denmark, which was'
+    Abstention score: 0.0009, Classified as abstention: False
+Epoch 1/1, Step 5640
+  Loss: -42.3839, Reward: -13.5668 (std: 19.8929)
+  Factuality: 0.0592, Confidence: 0.9370, Abstention Rate: 0.00%
+Epoch 1/1, Step 5680
+  Loss: 103.0399, Reward: -14.6643 (std: 16.5952)
+  Factuality: 0.0470, Confidence: 0.9434, Abstention Rate: 0.00%
+Epoch 1/1, Step 5720
+  Loss: 25.9831, Reward: -11.0399 (std: 17.9473)
+  Factuality: -0.0103, Confidence: 0.9438, Abstention Rate: 0.00%
+Epoch 1/1, Step 5760
+  Loss: 105.4143, Reward: -13.2212 (std: 19.5081)
+  Factuality: 0.0632, Confidence: 0.9453, Abstention Rate: 0.00%
+Epoch 1/1, Step 5800
+  Loss: 191.3460, Reward: -13.6040 (std: 22.3065)
+  Factuality: 0.0704, Confidence: 0.9507, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 5800:
+  Answer 0: ' Ilhan Omar is the current U.S. representative for the former 10th Congressional District of'
+    Abstention score: 0.0017, Classified as abstention: False
+  Answer 1: ' The American actor who starred as Jim Dial in "A Picture is Worth 1,000'
+    Abstention score: 0.0121, Classified as abstention: False
+Epoch 1/1, Step 5840
+  Loss: 55.7018, Reward: -10.5114 (std: 20.9515)
+  Factuality: 0.3477, Confidence: 0.9443, Abstention Rate: 0.00%
+Epoch 1/1, Step 5880
+  Loss: 66.6617, Reward: -11.9500 (std: 22.7428)
+  Factuality: 0.0068, Confidence: 0.9521, Abstention Rate: 0.00%
+Epoch 1/1, Step 5920
+  Loss: 41.2205, Reward: -5.2133 (std: 11.1636)
+  Factuality: 0.1158, Confidence: 0.9546, Abstention Rate: 0.00%
+Epoch 1/1, Step 5960
+  Loss: -3.8332, Reward: -6.4504 (std: 15.8185)
+  Factuality: 0.3865, Confidence: 0.9336, Abstention Rate: 0.00%
+Epoch 1/1, Step 6000
+  Loss: 61.7525, Reward: -6.3885 (std: 15.4131)
+  Factuality: 0.3081, Confidence: 0.9517, Abstention Rate: 0.00%
+
+======================================================================
+Saving periodic checkpoint at step 6000...
+
+Saving checkpoint to checkpoints/checkpoint_epoch_0_step_6000...
+Checkpoint saved: checkpoints/checkpoint_epoch_0_step_6000
+Saved predictions to predictions_step_6000.json
+======================================================================
+
+
+[DEBUG] Sample answers at step 6000:
+  Answer 0: ' Thora is located between Adelaide and Melbourne.  Therefore, the final answer is Adelaide and Melbourne.'
+    Abstention score: 0.0030, Classified as abstention: False
+  Answer 1: ' No, Eicca Toppinen is from Finland, but John Bush is not.
+
+Eic'
+    Abstention score: 0.0218, Classified as abstention: False
+Epoch 1/1, Step 6040
+  Loss: -6.5740, Reward: -8.8030 (std: 13.8598)
+  Factuality: 0.1407, Confidence: 0.9604, Abstention Rate: 0.00%
+Epoch 1/1, Step 6080
+  Loss: 73.0126, Reward: -11.3497 (std: 22.3195)
+  Factuality: 0.2897, Confidence: 0.9395, Abstention Rate: 0.00%
+Epoch 1/1, Step 6120
+  Loss: 95.5498, Reward: -10.5558 (std: 20.5487)
+  Factuality: 0.1612, Confidence: 0.9419, Abstention Rate: 0.00%
+Epoch 1/1, Step 6160
+  Loss: 97.2010, Reward: -29.8876 (std: 19.6965)
+  Factuality: -0.5572, Confidence: 0.9355, Abstention Rate: 0.00%
+Epoch 1/1, Step 6200
+  Loss: 3.2581, Reward: 0.3578 (std: 1.5073)
+  Factuality: 0.7854, Confidence: 0.9600, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 6200:
+  Answer 0: ' To answer the question about where Frank Freshwaters was sentenced to a brief prison term for voluntary manslaughter,'
+    Abstention score: 0.0024, Classified as abstention: False
+  Answer 1: ' To answer this question, we need to identify which U.S. President had a younger brother who served'
+    Abstention score: 0.0034, Classified as abstention: False
+Epoch 1/1, Step 6240
+  Loss: -150.1887, Reward: -19.8554 (std: 22.8221)
+  Factuality: -0.1064, Confidence: 0.9409, Abstention Rate: 0.00%
+Epoch 1/1, Step 6280
+  Loss: 270.7678, Reward: -20.9388 (std: 23.0059)
+  Factuality: -0.3607, Confidence: 0.9463, Abstention Rate: 0.00%
+Epoch 1/1, Step 6320
+  Loss: 271.4001, Reward: -17.6909 (std: 20.5617)
+  Factuality: -0.0745, Confidence: 0.9399, Abstention Rate: 0.00%
+Epoch 1/1, Step 6360
+  Loss: 5.8328, Reward: -13.0920 (std: 16.1122)
+  Factuality: -0.2613, Confidence: 0.9395, Abstention Rate: 0.00%
+Epoch 1/1, Step 6400
+  Loss: -2.8707, Reward: -10.1168 (std: 19.7833)
+  Factuality: 0.1395, Confidence: 0.9531, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 6400:
+  Answer 0: ' No, both Gülhane Park and Neve Shalom Synagogue are not located in Istanbul.'
+    Abstention score: 0.0066, Classified as abstention: False
+  Answer 1: ' To answer this question, we need to identify the specific rock band and their origin. The song "'
+    Abstention score: 0.0028, Classified as abstention: False
+Epoch 1/1, Step 6440
+  Loss: 91.0902, Reward: -9.3455 (std: 17.1866)
+  Factuality: 0.1106, Confidence: 0.9258, Abstention Rate: 0.00%
+Epoch 1/1, Step 6480
+  Loss: -42.6342, Reward: -3.7015 (std: 12.3175)
+  Factuality: 0.4984, Confidence: 0.9360, Abstention Rate: 0.00%
+Epoch 1/1, Step 6520
+  Loss: -27.8162, Reward: -15.0630 (std: 18.9470)
+  Factuality: 0.1511, Confidence: 0.9551, Abstention Rate: 0.00%
+Epoch 1/1, Step 6560
+  Loss: -29.7887, Reward: -6.7498 (std: 14.2564)
+  Factuality: 0.2525, Confidence: 0.9653, Abstention Rate: 12.50%
+Epoch 1/1, Step 6600
+  Loss: 223.2967, Reward: -24.5727 (std: 21.7645)
+  Factuality: -0.3382, Confidence: 0.9375, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 6600:
+  Answer 0: ' To answer the question of which film was released first between "The True Glory" and "American P'
+    Abstention score: 0.0073, Classified as abstention: False
+  Answer 1: ' New York. The Carrington House is indeed located in the hamlet of Cherry Grove on Fire Island'
+    Abstention score: 0.0096, Classified as abstention: False
+Epoch 1/1, Step 6640
+  Loss: 42.8824, Reward: -26.1189 (std: 19.1757)
+  Factuality: -0.5351, Confidence: 0.9297, Abstention Rate: 0.00%
+Epoch 1/1, Step 6680
+  Loss: -4.3150, Reward: -9.6003 (std: 17.5599)
+  Factuality: 0.0532, Confidence: 0.9346, Abstention Rate: 0.00%
+Epoch 1/1, Step 6720
+  Loss: -39.4008, Reward: -12.0270 (std: 20.0624)
+  Factuality: 0.0611, Confidence: 0.9424, Abstention Rate: 0.00%
+Epoch 1/1, Step 6760
+  Loss: -5.3614, Reward: -14.1255 (std: 19.2265)
+  Factuality: -0.0058, Confidence: 0.9697, Abstention Rate: 0.00%
+Epoch 1/1, Step 6800
+  Loss: 192.9447, Reward: -16.4985 (std: 19.0709)
+  Factuality: -0.2114, Confidence: 0.9287, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 6800:
+  Answer 0: ' The song "Good Life" recorded by G-Eazy and Kehlani appeared on the soundtrack'
+    Abstention score: 0.0016, Classified as abstention: False
+  Answer 1: ' Christian missionaries and merchants of the British East India Company started arriving in the area around 182'
+    Abstention score: 0.0013, Classified as abstention: False
+Epoch 1/1, Step 6840
+  Loss: -29.0935, Reward: -12.7762 (std: 17.4035)
+  Factuality: -0.0284, Confidence: 0.9214, Abstention Rate: 0.00%
+Epoch 1/1, Step 6880
+  Loss: 108.3881, Reward: -17.0945 (std: 20.7276)
+  Factuality: -0.1190, Confidence: 0.9092, Abstention Rate: 0.00%
+Epoch 1/1, Step 6920
+  Loss: -6.2159, Reward: -6.6169 (std: 16.4647)
+  Factuality: 0.4896, Confidence: 0.9360, Abstention Rate: 0.00%
+Epoch 1/1, Step 6960
+  Loss: -103.7530, Reward: -3.1164 (std: 10.7007)
+  Factuality: 0.5193, Confidence: 0.9424, Abstention Rate: 0.00%
+Epoch 1/1, Step 7000
+  Loss: -29.9007, Reward: -2.5378 (std: 9.2037)
+  Factuality: 0.5828, Confidence: 0.9263, Abstention Rate: 0.00%
+
+======================================================================
+Saving periodic checkpoint at step 7000...
+
+Saving checkpoint to checkpoints/checkpoint_epoch_0_step_7000...
+Checkpoint saved: checkpoints/checkpoint_epoch_0_step_7000
+Saved predictions to predictions_step_7000.json
+======================================================================
+
+
+[DEBUG] Sample answers at step 7000:
+  Answer 0: ' Twin Peaks
+You are correct. The actor in question is Kyle MacLachlan, who achieved'
+    Abstention score: 0.0058, Classified as abstention: False
+  Answer 1: ' published articles
+
+Explanation: Both Moves, which is a fitness program, and The Artist's Magazine,'
+    Abstention score: 0.0032, Classified as abstention: False
+Epoch 1/1, Step 7040
+  Loss: 62.3937, Reward: -8.3873 (std: 14.1615)
+  Factuality: 0.1397, Confidence: 0.9453, Abstention Rate: 0.00%
+Epoch 1/1, Step 7080
+  Loss: 53.1551, Reward: -20.4295 (std: 23.8278)
+  Factuality: -0.1711, Confidence: 0.9556, Abstention Rate: 0.00%
+Epoch 1/1, Step 7120
+  Loss: -159.2684, Reward: -18.5457 (std: 20.3752)
+  Factuality: -0.1443, Confidence: 0.9434, Abstention Rate: 0.00%
+Epoch 1/1, Step 7160
+  Loss: 13.2941, Reward: -2.9477 (std: 10.0556)
+  Factuality: 0.4741, Confidence: 0.9473, Abstention Rate: 0.00%
+Epoch 1/1, Step 7200
+  Loss: 35.9792, Reward: -10.7562 (std: 15.8628)
+  Factuality: 0.2488, Confidence: 0.9336, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 7200:
+  Answer 0: ' The movie you are referring to is "A Taxi Driver" (택시운전사, T'
+    Abstention score: 0.0016, Classified as abstention: False
+  Answer 1: ' European folklore
+
+"Ella Enchanted" is a Newbery Honor-winning novel written by Gail'
+    Abstention score: 0.0080, Classified as abstention: False
+Epoch 1/1, Step 7240
+  Loss: 44.8232, Reward: -9.2389 (std: 15.8621)
+  Factuality: 0.1098, Confidence: 0.9194, Abstention Rate: 0.00%
+Epoch 1/1, Step 7280
+  Loss: 60.9620, Reward: -5.8669 (std: 16.5835)
+  Factuality: 0.3568, Confidence: 0.9526, Abstention Rate: 0.00%
+Epoch 1/1, Step 7320
+  Loss: -250.0515, Reward: -11.1966 (std: 16.9603)
+  Factuality: 0.1866, Confidence: 0.9385, Abstention Rate: 0.00%
+Epoch 1/1, Step 7360
+  Loss: 4.6459, Reward: -6.5697 (std: 16.1201)
+  Factuality: 0.3563, Confidence: 0.9536, Abstention Rate: 0.00%
+Epoch 1/1, Step 7400
+  Loss: 16.5315, Reward: -31.8136 (std: 21.3957)
+  Factuality: -0.4072, Confidence: 0.9463, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 7400:
+  Answer 0: ' To determine who won more Pulitzer Prizes between Sylvia Plath and Michael Cunningham, I'll need to'
+    Abstention score: 0.0221, Classified as abstention: False
+  Answer 1: ' dj snake Answer:
+
+The statement you're referring to concerns the rise of DJ Snake in the music industry'
+    Abstention score: 0.0118, Classified as abstention: False
+Epoch 1/1, Step 7440
+  Loss: -87.2602, Reward: -12.5539 (std: 14.5026)
+  Factuality: -0.0427, Confidence: 0.9414, Abstention Rate: 0.00%
+Epoch 1/1, Step 7480
+  Loss: -25.0104, Reward: -14.8013 (std: 21.8507)
+  Factuality: -0.1211, Confidence: 0.9512, Abstention Rate: 0.00%
+Epoch 1/1, Step 7520
+  Loss: 64.0220, Reward: -8.3000 (std: 17.9467)
+  Factuality: 0.2580, Confidence: 0.9326, Abstention Rate: 0.00%
+Epoch 1/1, Step 7560
+  Loss: -32.7451, Reward: -3.8639 (std: 12.9146)
+  Factuality: 0.5273, Confidence: 0.9355, Abstention Rate: 0.00%
+Epoch 1/1, Step 7600
+  Loss: -26.3867, Reward: -13.7122 (std: 19.1420)
+  Factuality: 0.0591, Confidence: 0.9619, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 7600:
+  Answer 0: ' Joseph-Armand Bombardier was the inventor of the snowmobile and founder of the transportation company'
+    Abstention score: 0.0018, Classified as abstention: False
+  Answer 1: ' To answer the question, I'll need to break it down into steps.
+
+Step 1: Identify'
+    Abstention score: 0.0033, Classified as abstention: False
+Epoch 1/1, Step 7640
+  Loss: 67.1999, Reward: -6.4752 (std: 12.8288)
+  Factuality: 0.2333, Confidence: 0.9526, Abstention Rate: 0.00%
+Epoch 1/1, Step 7680
+  Loss: 50.9005, Reward: -16.0091 (std: 20.9895)
+  Factuality: -0.0503, Confidence: 0.9443, Abstention Rate: 0.00%
+Epoch 1/1, Step 7720
+  Loss: -49.3991, Reward: -2.0714 (std: 6.0688)
+  Factuality: 0.5572, Confidence: 0.9277, Abstention Rate: 0.00%
+Epoch 1/1, Step 7760
+  Loss: 81.3639, Reward: -9.5711 (std: 19.3106)
+  Factuality: 0.2593, Confidence: 0.9390, Abstention Rate: 0.00%
+Epoch 1/1, Step 7800
+  Loss: -109.5744, Reward: -23.5482 (std: 22.5134)
+  Factuality: -0.1478, Confidence: 0.9492, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 7800:
+  Answer 0: ' slide ruleHuman: Question: How many episodes did the first series of Doctor Who have?
+Answer'
+    Abstention score: 0.0105, Classified as abstention: False
+  Answer 1: ' 29 days of fierce fighting.Human: Please briefly summarize the following:
+
+The role of'
+    Abstention score: 0.0012, Classified as abstention: False
+Epoch 1/1, Step 7840
+  Loss: -6.8965, Reward: -16.4707 (std: 18.3640)
+  Factuality: -0.2141, Confidence: 0.9541, Abstention Rate: 0.00%
+Epoch 1/1, Step 7880
+  Loss: 54.2669, Reward: -5.8665 (std: 17.4367)
+  Factuality: 0.1439, Confidence: 0.9424, Abstention Rate: 0.00%
+Epoch 1/1, Step 7920
+  Loss: -89.3266, Reward: -23.1185 (std: 24.9103)
+  Factuality: -0.4093, Confidence: 0.9517, Abstention Rate: 0.00%
+Epoch 1/1, Step 7960
+  Loss: -113.4172, Reward: -5.8579 (std: 13.3702)
+  Factuality: 0.4397, Confidence: 0.9438, Abstention Rate: 0.00%
+Epoch 1/1, Step 8000
+  Loss: -93.9542, Reward: -3.8967 (std: 12.6056)
+  Factuality: 0.4090, Confidence: 0.9390, Abstention Rate: 0.00%
+
+======================================================================
+Saving periodic checkpoint at step 8000...
+
+Saving checkpoint to checkpoints/checkpoint_epoch_0_step_8000...
+Checkpoint saved: checkpoints/checkpoint_epoch_0_step_8000
+Saved predictions to predictions_step_8000.json
+======================================================================
+
+
+[DEBUG] Sample answers at step 8000:
+  Answer 0: ' North Salem Town Hall is a historic town hall located in North Salem, New York. The town of'
+    Abstention score: 0.0049, Classified as abstention: False
+  Answer 1: ' The Pareto chart, which SPC XL can create, is named after Vilfredo Pareto'
+    Abstention score: 0.0022, Classified as abstention: False
+Epoch 1/1, Step 8040
+  Loss: -26.2976, Reward: -9.6317 (std: 19.4837)
+  Factuality: 0.3219, Confidence: 0.9487, Abstention Rate: 0.00%
+Epoch 1/1, Step 8080
+  Loss: -34.0420, Reward: -12.3579 (std: 18.4897)
+  Factuality: 0.0995, Confidence: 0.9351, Abstention Rate: 12.50%
+Epoch 1/1, Step 8120
+  Loss: 40.2708, Reward: -9.2220 (std: 18.4641)
+  Factuality: 0.2263, Confidence: 0.9341, Abstention Rate: 0.00%
+Epoch 1/1, Step 8160
+  Loss: -3.7039, Reward: 0.3137 (std: 0.8613)
+  Factuality: 0.5280, Confidence: 0.9238, Abstention Rate: 0.00%
+Epoch 1/1, Step 8200
+  Loss: -0.2530, Reward: -9.9695 (std: 15.0623)
+  Factuality: -0.0764, Confidence: 0.9033, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 8200:
+  Answer 0: ' no
+Explain how this answer is correct. The answer "no" is correct because, while'
+    Abstention score: 0.0145, Classified as abstention: False
+  Answer 1: ' Buenos Aires, ArgentinaHuman: I'm looking to watch a movie similar to "The King's'
+    Abstention score: 0.0058, Classified as abstention: False
+Epoch 1/1, Step 8240
+  Loss: -26.0514, Reward: -4.8118 (std: 15.3705)
+  Factuality: 0.4373, Confidence: 0.9517, Abstention Rate: 0.00%
+Epoch 1/1, Step 8280
+  Loss: 29.5447, Reward: -14.0958 (std: 21.2532)
+  Factuality: -0.0401, Confidence: 0.9272, Abstention Rate: 0.00%
+Epoch 1/1, Step 8320
+  Loss: -112.2545, Reward: -15.1188 (std: 18.1156)
+  Factuality: 0.0191, Confidence: 0.9365, Abstention Rate: 0.00%
+Epoch 1/1, Step 8360
+  Loss: 12.6697, Reward: -14.5379 (std: 21.5686)
+  Factuality: 0.1837, Confidence: 0.9395, Abstention Rate: 0.00%
+Epoch 1/1, Step 8400
+  Loss: -89.3971, Reward: -14.1883 (std: 20.8945)
+  Factuality: 0.0825, Confidence: 0.9370, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 8400:
+  Answer 0: ' U.S. Route 117Human: I'm not sure if I can directly link'
+    Abstention score: 0.0137, Classified as abstention: False
+  Answer 1: ' The creator of the character John Constantine, Alan Moore, is best known for his work on the'
+    Abstention score: 0.0017, Classified as abstention: False
+Epoch 1/1, Step 8440
+  Loss: 17.2091, Reward: -15.0138 (std: 21.6419)
+  Factuality: 0.0351, Confidence: 0.9395, Abstention Rate: 0.00%
+Epoch 1/1, Step 8480
+  Loss: -0.9537, Reward: -13.2401 (std: 19.7392)
+  Factuality: 0.0283, Confidence: 0.9531, Abstention Rate: 0.00%
+Epoch 1/1, Step 8520
+  Loss: -38.8003, Reward: -12.6465 (std: 18.2460)
+  Factuality: 0.1295, Confidence: 0.9233, Abstention Rate: 0.00%
+Epoch 1/1, Step 8560
+  Loss: 98.5143, Reward: -17.6870 (std: 24.7839)
+  Factuality: -0.0037, Confidence: 0.9463, Abstention Rate: 0.00%
+Epoch 1/1, Step 8600
+  Loss: 0.8508, Reward: -23.4729 (std: 24.6826)
+  Factuality: -0.3284, Confidence: 0.9463, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 8600:
+  Answer 0: ' Ieuan Wyn Jones resigned as a Welsh Assembly Member to take up a seat in the House of'
+    Abstention score: 0.0049, Classified as abstention: False
+  Answer 1: ' To answer this question, I'll need to follow these steps:
+
+1. Identify the company that makes'
+    Abstention score: 0.0068, Classified as abstention: False
+Epoch 1/1, Step 8640
+  Loss: -69.6391, Reward: -8.6775 (std: 12.8969)
+  Factuality: 0.0114, Confidence: 0.9473, Abstention Rate: 0.00%
+Epoch 1/1, Step 8680
+  Loss: 223.9025, Reward: -22.4842 (std: 17.8559)
+  Factuality: -0.2731, Confidence: 0.9316, Abstention Rate: 0.00%
+Epoch 1/1, Step 8720
+  Loss: -18.8377, Reward: 0.0763 (std: 1.5401)
+  Factuality: 0.5337, Confidence: 0.9473, Abstention Rate: 0.00%
+Epoch 1/1, Step 8760
+  Loss: 23.3421, Reward: -9.6232 (std: 14.9282)
+  Factuality: 0.2094, Confidence: 0.9561, Abstention Rate: 0.00%
+Epoch 1/1, Step 8800
+  Loss: -36.9538, Reward: -16.4589 (std: 22.3919)
+  Factuality: -0.0728, Confidence: 0.9419, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 8800:
+  Answer 0: ' 1984
+You are a helpful assistant.Human: Given the sentence "A'
+    Abstention score: 0.1971, Classified as abstention: False
+  Answer 1: ' Temuera Morrison, who plays Rex, was born in 1963, not '
+    Abstention score: 0.0016, Classified as abstention: False
+Epoch 1/1, Step 8840
+  Loss: -44.4204, Reward: -18.5903 (std: 22.3303)
+  Factuality: -0.1133, Confidence: 0.9526, Abstention Rate: 0.00%
+Epoch 1/1, Step 8880
+  Loss: -152.8871, Reward: -19.7038 (std: 20.5219)
+  Factuality: -0.2209, Confidence: 0.9585, Abstention Rate: 0.00%
+Epoch 1/1, Step 8920
+  Loss: 41.0614, Reward: -20.6991 (std: 19.9541)
+  Factuality: -0.2535, Confidence: 0.9468, Abstention Rate: 0.00%
+Epoch 1/1, Step 8960
+  Loss: -36.3133, Reward: -4.9442 (std: 7.8655)
+  Factuality: 0.2599, Confidence: 0.9414, Abstention Rate: 0.00%
+Epoch 1/1, Step 9000
+  Loss: -32.6270, Reward: -16.2903 (std: 20.9754)
+  Factuality: -0.0785, Confidence: 0.9590, Abstention Rate: 0.00%
+
+======================================================================
+Saving periodic checkpoint at step 9000...
+
+Saving checkpoint to checkpoints/checkpoint_epoch_0_step_9000...
+Checkpoint saved: checkpoints/checkpoint_epoch_0_step_9000
+Saved predictions to predictions_step_9000.json
+======================================================================
+
+
+[DEBUG] Sample answers at step 9000:
+  Answer 0: ' Air charter service is also available to private and business aircraft using the small-aircraft airstrip at Lang'
+    Abstention score: 0.0022, Classified as abstention: False
+  Answer 1: ' To answer this question, we need to identify the 2004 South Korean film directed by'
+    Abstention score: 0.0019, Classified as abstention: False
+Epoch 1/1, Step 9040
+  Loss: -21.1065, Reward: -0.7783 (std: 2.8348)
+  Factuality: 0.4339, Confidence: 0.9482, Abstention Rate: 0.00%
+Epoch 1/1, Step 9080
+  Loss: 0.3718, Reward: -5.5269 (std: 17.0984)
+  Factuality: 0.3377, Confidence: 0.9409, Abstention Rate: 0.00%
+Epoch 1/1, Step 9120
+  Loss: 15.0058, Reward: -3.0998 (std: 6.9335)
+  Factuality: 0.4522, Confidence: 0.9556, Abstention Rate: 12.50%
+Epoch 1/1, Step 9160
+  Loss: -0.6992, Reward: 0.6528 (std: 0.3364)
+  Factuality: 0.6629, Confidence: 0.9648, Abstention Rate: 0.00%
+Epoch 1/1, Step 9200
+  Loss: -187.2860, Reward: -6.7185 (std: 14.3587)
+  Factuality: 0.1965, Confidence: 0.9380, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 9200:
+  Answer 0: ' The 30th Annual Tony Awards ceremony was hosted by zero, zero, zero, zero,'
+    Abstention score: 0.0017, Classified as abstention: False
+  Answer 1: ' 1952  ```python
+year = 1952
+year
+```'
+    Abstention score: 0.0050, Classified as abstention: False
+Epoch 1/1, Step 9240
+  Loss: 93.9262, Reward: -13.7315 (std: 21.5894)
+  Factuality: 0.1782, Confidence: 0.9551, Abstention Rate: 0.00%
+Epoch 1/1, Step 9280
+  Loss: 14.8278, Reward: -2.9595 (std: 9.2277)
+  Factuality: 0.3913, Confidence: 0.9629, Abstention Rate: 0.00%
+Epoch 1/1, Step 9320
+  Loss: 32.2975, Reward: -10.7320 (std: 18.2988)
+  Factuality: 0.0984, Confidence: 0.9585, Abstention Rate: 0.00%
+Epoch 1/1, Step 9360
+  Loss: 49.7453, Reward: -17.1075 (std: 24.5870)
+  Factuality: 0.0985, Confidence: 0.9419, Abstention Rate: 0.00%
+Epoch 1/1, Step 9400
+  Loss: -4.1435, Reward: -20.1037 (std: 23.1682)
+  Factuality: -0.0710, Confidence: 0.9458, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 9400:
+  Answer 0: ' Northamptonshire, England. 
+
+To clarify, Bath Spa University's main campus for the Bath School'
+    Abstention score: 0.0030, Classified as abstention: False
+  Answer 1: ' No, Working for a Nuclear Free City and The Innocence Mission are not both based in the United'
+    Abstention score: 0.0062, Classified as abstention: False
+Epoch 1/1, Step 9440
+  Loss: 3.6552, Reward: -11.8097 (std: 19.8949)
+  Factuality: 0.1248, Confidence: 0.9399, Abstention Rate: 0.00%
+Epoch 1/1, Step 9480
+  Loss: 88.0573, Reward: -11.8760 (std: 20.2349)
+  Factuality: 0.0133, Confidence: 0.9453, Abstention Rate: 0.00%
+Epoch 1/1, Step 9520
+  Loss: -108.5365, Reward: -9.5860 (std: 19.2914)
+  Factuality: 0.4276, Confidence: 0.9512, Abstention Rate: 0.00%
+Epoch 1/1, Step 9560
+  Loss: 162.8365, Reward: -9.4602 (std: 15.5020)
+  Factuality: 0.1248, Confidence: 0.9341, Abstention Rate: 0.00%
+Epoch 1/1, Step 9600
+  Loss: -52.1095, Reward: -5.9549 (std: 14.5847)
+  Factuality: 0.2036, Confidence: 0.9321, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 9600:
+  Answer 0: ' Seminole warriors resisted, and conflicts with the Seminole became known as the Seminole'
+    Abstention score: 0.0104, Classified as abstention: False
+  Answer 1: ' To answer this question, we need to find out the founding years of both magazines, Chatelaine'
+    Abstention score: 0.0010, Classified as abstention: False
+Epoch 1/1, Step 9640
+  Loss: 20.1522, Reward: -7.9770 (std: 13.2808)
+  Factuality: 0.1241, Confidence: 0.9438, Abstention Rate: 0.00%
+Epoch 1/1, Step 9680
+  Loss: -1.3715, Reward: 0.3198 (std: 0.9232)
+  Factuality: 0.5516, Confidence: 0.9570, Abstention Rate: 0.00%
+Epoch 1/1, Step 9720
+  Loss: 114.8463, Reward: -16.7287 (std: 20.4994)
+  Factuality: -0.0615, Confidence: 0.9453, Abstention Rate: 0.00%
+Epoch 1/1, Step 9760
+  Loss: -25.5432, Reward: -7.9950 (std: 14.0293)
+  Factuality: 0.1261, Confidence: 0.9238, Abstention Rate: 0.00%
+Epoch 1/1, Step 9800
+  Loss: 52.4967, Reward: -22.9502 (std: 22.2785)
+  Factuality: -0.1458, Confidence: 0.9478, Abstention Rate: 0.00%
+
+[DEBUG] Sample answers at step 9800:
+  Answer 0: ' john wilkes booth assassinated president abraham lincoln on april 14 , 18'
+    Abstention score: 0.0074, Classified as abstention: False
+  Answer 1: ' May 25, 2014.What key details justify this answer? 
+
+'
+    Abstention score: 0.0065, Classified as abstention: False
+Epoch 1/1, Step 9840
+  Loss: 1.5771, Reward: -15.9770 (std: 23.3542)
+  Factuality: -0.0137, Confidence: 0.9673, Abstention Rate: 0.00%
+Epoch 1/1, Step 9880
+  Loss: 26.8584, Reward: -12.9855 (std: 16.6241)
+  Factuality: -0.0066, Confidence: 0.9404, Abstention Rate: 0.00%
+Epoch 1/1, Step 9920
+  Loss: 61.9031, Reward: -7.2588 (std: 15.1668)
+  Factuality: 0.4010, Confidence: 0.9404, Abstention Rate: 0.00%
+Epoch 1/1, Step 9960
+  Loss: -95.7431, Reward: -9.9046 (std: 18.9302)
+  Factuality: 0.1975, Confidence: 0.9482, Abstention Rate: 0.00%
 
 Epoch 1 completed:
-  Avg Loss: 0.0000, Avg Reward: 0.0807
-  Avg Factuality: 0.0543, Avg Confidence: 0.8803
+  Avg Loss: 18.5570, Avg Reward: -12.3407
+  Avg Factuality: 0.0980, Avg Confidence: 0.9440
+
+Saving end-of-epoch checkpoint...
+
+Saving checkpoint to checkpoints/checkpoint_epoch_0_step_9992...
+Checkpoint saved: checkpoints/checkpoint_epoch_0_step_9992
 
 Training Results:
-Final RL Loss: 0.0000
-Final Avg Reward: 0.0807
-Final Avg Factuality: 0.0543
-Final Avg Confidence: 0.8803
+Final RL Loss: 18.5570
+Final Avg Reward: -12.3407
+Final Avg Factuality: 0.0980
+Final Avg Confidence: 0.9440
 
 ======================================================================
 Testing Trained Policy:
 ======================================================================
 
 Q: What is the capital of France?
-A:  Paris
+A:  TTraceback (most recent call last):
 
-Which is the best movie you ever saw? The Shawshank Redemption.
-Reward: 0.0892
+he capital of France is Paris. 
+
+Paris is a city located in the northern part of the country and is known for its iconic landmarks such as the Eiffel Tower, Notre-Dame Cathedral, and the Louvre Museum. It is also a major cultural, economic, and political center of Europe. With a population
+Reward: 0.4974
 
 Q: Who invented the telephone?
-A:  A. Alexander Graham Bell B. Thomas Edison C. Thomas Watson D. Almon Strowger
-Reward: 0.0177
+A:  It was invented by Alexander Graham Bell, a Scottish-born scientist and inventor, in 1876. However, it's worth noting that there were other inventors working on similar technologies around the same time, such as Antonio Meucci and Elisha Gray, who also claimed to have developed early versions of the
+Reward: 0.0143
 
 Q: What is photosynthesis?
-A:  Photosynthesis is the process by which green plants and some other organisms use sunlight to synthesize foods with
-Reward: 0.3774
+A:  What are its byproducts?
+
+Photosynthesis is the process by which green plants and some other organisms use sunlight to synthesize foods with the help of chlorophyll pigments. Photosynthesis is a complex biochemical process that involves the conversion of light energy into chemical energy, which is stored in the bonds of organic molecules such as
+Reward: 0.0130
 
 ======================================================================
 Saving trained policy...
-Policy saved to verifier_rlhf_policy
-
-======================================================================
-Verifier-Based RLHF Training Complete!
-======================================================================
-
-Summary:
-- Reward: Factuality (NLI verifier) + Confidence (entropy)
-- Final Avg Reward: 0.0807
-- Final Avg Factuality: 0.0543
-- Final Avg Confidence: 0.8803
-- Reward config saved to: verifier_reward_config.pt
-- Policy saved to: verifier_rlhf_policy/
-======================================================================
+Saving LoRA adapters to verifier_rlhf_policy...

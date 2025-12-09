@@ -272,6 +272,15 @@ Answer: """
     num_abstentions = sum(1 for result in detailed_results if result["is_abstention"])
     abstention_rate = (num_abstentions / len(detailed_results)) * 100
 
+    # Calculate metrics for non-abstained samples only
+    non_abstained_gold = [gold for gold, abs_flag in zip(gold_answers, abstained) if not abs_flag]
+    non_abstained_pred = [pred for pred, abs_flag in zip(pred_answers, abstained) if not abs_flag]
+
+    if len(non_abstained_pred) > 0:
+        non_abstained_metrics = compute_metrics(non_abstained_gold, non_abstained_pred, abstained=None)
+    else:
+        non_abstained_metrics = {"EM": 0.0, "F1": 0.0}
+
     final_results = {
         "model": MODEL_ID,
         "dataset": DATASET_NAME,
@@ -279,7 +288,10 @@ Answer: """
         "EM": metrics['EM'],
         "F1": metrics['F1'],
         "Avg_RAUQ": avg_rauq,
-        "Abstention_Rate": abstention_rate
+        "Abstention_Rate": abstention_rate,
+        "Non_Abstained_EM": non_abstained_metrics['EM'],
+        "Non_Abstained_F1": non_abstained_metrics['F1'],
+        "Non_Abstained_Count": len(non_abstained_pred)
     }
 
     print(f"\nResults for {MODEL_ID} on HotpotQA:")
@@ -287,6 +299,9 @@ Answer: """
     print(f"  F1 Score (F1): {metrics['F1']:.2f}%")
     print(f"  Avg RAUQ Uncertainty: {avg_rauq:.4f}")
     print(f"  Abstention Rate: {abstention_rate:.2f}% ({num_abstentions}/{len(detailed_results)} samples)")
+    print(f"\n  Non-Abstained Samples ({len(non_abstained_pred)} samples):")
+    print(f"    EM: {non_abstained_metrics['EM']:.2f}%")
+    print(f"    F1: {non_abstained_metrics['F1']:.2f}%")
 
     # --- Save Results to JSON ---
     print(f"Saving detailed results to {DETAILED_OUTPUT_FILE}...")
