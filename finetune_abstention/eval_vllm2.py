@@ -3,19 +3,20 @@ import json
 import re
 import string
 import numpy as np
+import argparse
 from collections import Counter
 from datasets import load_dataset
 from tqdm import tqdm
 
 # vLLM Imports
 from vllm import LLM, SamplingParams
+from vllm.lora.request import LoRARequest
 
 # ==========================================
-# 1. Configuration
+# 1. Configuration & Args
 # ==========================================
 
-# CHANGED: Updated Model ID
-MODEL_ID = "fsiddiqui2/Qwen2.5-7B-Instruct-HotpotQA-Abstention-CoT-10000"
+BASE_MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
 DATASET_NAME = "hotpot_qa"
 SUBSET_NAME = "distractor"
 SPLIT = "validation"
@@ -24,11 +25,19 @@ SPLIT = "validation"
 DELIMITER_PROMPT = " ###\n"
 DELIMITER_ANSWER = " --> "
 DELIMITER_END = " END"
-REFUSAL_PHRASE = "i dont know"  # Normalized check string
+REFUSAL_PHRASE = "i dont know" 
 
-# Output Files
-OUTPUT_FILE = "qwen_abstention_cot_eval_results.json"
-METRICS_FILE = "qwen_abstention_cot_eval_metrics.json"
+def parse_args():
+    parser = argparse.ArgumentParser(description="Evaluate a LoRA adapter using vLLM")
+    
+    parser.add_argument(
+        "--adapter_path", 
+        type=str, 
+        required=True, 
+        help="Path to the training run folder. Script will automatically look for 'final_adapter' inside."
+    )
+    
+    return parser.parse_args()
 
 # ==========================================
 # 2. Metric Utilities
@@ -62,9 +71,7 @@ def exact_match_score(prediction, ground_truth):
     return (normalize_answer(prediction) == normalize_answer(ground_truth))
 
 def check_abstention(prediction):
-    """Returns True if the prediction is a refusal."""
     norm_pred = normalize_answer(prediction)
-    # Check if the refusal phrase is in the output (or is the output)
     return REFUSAL_PHRASE in norm_pred
 
 # ==========================================
@@ -72,6 +79,29 @@ def check_abstention(prediction):
 # ==========================================
 
 def main():
+    args = parse_args()
+    
+    # --- Intelligent Path Handling ---
+    adapter_path = args.adapter_path.rstrip("/")
+    
+    # If the user points to the run folder, automatically append 'final_adapter'
+    if not adapter_path.endswith("final_adapter"):
+        potential_path = os.path.join(adapter_path, "final_adapter")
+        if os.path.isdir(potential_path):
+            print(f"Found 'final_adapter' inside run folder. Using: {potential_path}")
+            adapter_path = potential_path
+        else:
+            # Fallback: maybe they pointed to a checkpoint folder or the raw files are there
+            print(f"Warning: 'final_adapter' not found inside {adapter_path}. Trying to use path directly.")
+
+    if not os.path.exists(adapter_path):
+        raise FileNotFoundError(f"Could not find adapter files at: {adapter_path}")
+
+    # Generate output filenames based on the adapter folder name for uniqueness
+    run_name = os.path.basename(os.path.dirname(adapter_path)) # Gets the parent folder name
+    output_file = f"eval_results_{run_name}.json"
+    metrics_file = f"eval_metrics_{run_name}.json"
+
     print(f"Loading {DATASET_NAME} ({SUBSET_NAME})...")
     dataset = load_dataset(DATASET_NAME, SUBSET_NAME, split=SPLIT)
     
@@ -90,10 +120,11 @@ def main():
     ids_list = [item['id'] for item in dataset]
     questions_list = [item['question'] for item in dataset]
 
-    # 2. Initialize vLLM
-    print(f"Initializing vLLM with model: {MODEL_ID}...")
+    # 2. Initialize vLLM with LoRA Enabled
+    print(f"Initializing vLLM with Base: {BASE_MODEL_ID} and Adapter: {adapter_path}...")
     llm = LLM(
-        model=MODEL_ID,
+        model=BASE_MODEL_ID,
+        enable_lora=True,
         trust_remote_code=True,
         dtype="float16",             
         gpu_memory_utilization=0.90, 
@@ -108,22 +139,25 @@ def main():
         stop=[DELIMITER_END, "<|im_end|>", "<|endoftext|>"] 
     )
 
-    # 4. Generate
-    print("🚀 Starting vLLM Generation...")
-    outputs = llm.generate(prompts, sampling_params)
+    # 4. Generate with LoRA Request
+    print("🚀 Starting vLLM Generation with Local Adapter...")
+    
+    lora_req = LoRARequest("adapter", 1, adapter_path)
+    
+    outputs = llm.generate(
+        prompts, 
+        sampling_params,
+        lora_request=lora_req 
+    )
 
     # 5. Process Results
     results = []
     
-    # Metric Accumulators
     total_samples = 0
     total_abstentions = 0
     
-    # Selective Lists (only for non-abstained samples)
     selective_em_scores = []
     selective_f1_scores = []
-    
-    # Standard Lists (all samples)
     standard_em_scores = []
     standard_f1_scores = []
 
@@ -136,43 +170,31 @@ def main():
         reasoning_trace = ""
         predicted_answer = ""
         
-        # --- Robust Parsing Logic ---
-        # Case A: Model used CoT (Found " --> ")
         if DELIMITER_ANSWER in generated_text:
             parts = generated_text.split(DELIMITER_ANSWER)
             reasoning_trace = parts[0].strip()
             if len(parts) > 1:
                 predicted_answer = parts[1].strip()
-        
-        # Case B: Model Refused Immediately (No " --> ")
-        # or Model outputted malformed text. We treat the whole text as the answer.
         else:
-            reasoning_trace = "" # No reasoning
+            reasoning_trace = "" 
             predicted_answer = generated_text.strip()
 
-        # Clean up tokens
         predicted_answer = predicted_answer.replace("END", "").strip()
         if predicted_answer.endswith("."):
             predicted_answer = predicted_answer[:-1]
 
-        # --- Check Abstention ---
         is_abstained = check_abstention(predicted_answer)
 
-        # --- Calculate Individual Scores ---
-        # If abstained, scores are 0.0 for standard metrics
         em = max([float(exact_match_score(predicted_answer, g)) for g in gold_answers])
         f1 = max([f1_score(predicted_answer, g)[0] for g in gold_answers])
 
-        # --- Aggregate ---
         total_samples += 1
         standard_em_scores.append(em)
         standard_f1_scores.append(f1)
 
         if is_abstained:
             total_abstentions += 1
-            # For selective metrics, we simply DO NOT append to the selective list
         else:
-            # If the model attempted an answer, we track it for selective stats
             selective_em_scores.append(em)
             selective_f1_scores.append(f1)
 
@@ -192,7 +214,6 @@ def main():
     standard_em = np.mean(standard_em_scores) * 100
     standard_f1 = np.mean(standard_f1_scores) * 100
     
-    # Selective metrics: Handle case where model abstains 100% of the time (avoid div by zero)
     if len(selective_em_scores) > 0:
         selective_em = np.mean(selective_em_scores) * 100
         selective_f1 = np.mean(selective_f1_scores) * 100
@@ -201,7 +222,8 @@ def main():
         selective_f1 = 0.0
 
     final_metrics = {
-        "model": MODEL_ID,
+        "base_model": BASE_MODEL_ID,
+        "adapter_path": adapter_path,
         "dataset": DATASET_NAME,
         "samples": total_samples,
         "abstention_rate": abstention_rate,
@@ -228,13 +250,12 @@ def main():
     print(f"Selective F1:    {selective_f1:.2f}%")
     print("="*30)
 
-    # Save
-    print(f"Saving detailed logs to {OUTPUT_FILE}...")
-    with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
+    print(f"Saving detailed logs to {output_file}...")
+    with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
     
-    print(f"Saving metrics to {METRICS_FILE}...")
-    with open(METRICS_FILE, 'w', encoding='utf-8') as f:
+    print(f"Saving metrics to {metrics_file}...")
+    with open(metrics_file, 'w', encoding='utf-8') as f:
         json.dump(final_metrics, f, indent=4)
         
     print("Done.")

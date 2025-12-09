@@ -8,11 +8,11 @@ from datasets import Dataset
 # ==========================================
 INPUT_FILE = "abstention_dataset_train.jsonl"
 OUTPUT_FILE = "abstention_dataset_70_30_10k.jsonl"
-HF_REPO_ID = "fsiddiqui2/hotpotqa-abstention-70-30"
+HF_REPO_ID = "fsiddiqui2/hotpotqa-abstention-90-10"
 
 MAX_TOTAL_SAMPLES = 10000
-TARGET_RATIO_REASONING = 0.70
-TARGET_RATIO_REFUSAL = 0.30
+TARGET_RATIO_REASONING = 0.90
+TARGET_RATIO_REFUSAL = 0.10
 
 # ==========================================
 # Main Logic
