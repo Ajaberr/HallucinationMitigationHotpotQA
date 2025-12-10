@@ -50,136 +50,140 @@ class SemanticEntropyFilter:
             
         return np.array(rejection_rates), np.array(performance_scores)
 
-    def calculate_rejection_curve(self, metric_key='exact_match', max_rejection=1.0):
+    def calculate_rejection_curve(self, data_subset, sorting_key, metric_evaluator, max_rejection=1.0):
         """
-        Calculates the curve based on Semantic Entropy sorting (Model Performance).
+        Generic curve calculator for a subset of data.
+        data_subset: List of items to analyze
+        sorting_key: function to extract the uncertainty value (for sorting)
+        metric_evaluator: function(item) -> float score (0.0 or 1.0 usually)
         """
-        sorted_scores = [x['metrics'][metric_key] for x in self.sorted_data]
-        return self._compute_exact_curve(sorted_scores, max_rejection)
-
-    def calculate_prr(self, model_auc, metric_key='exact_match', max_rejection=1.0):
-        """
-        Calculates PRR comparing Model vs Random vs Oracle.
-        """
-        # 1. Random Baseline
-        initial_accuracy = np.mean([d['metrics'][metric_key] for d in self.data])
-        random_auc = initial_accuracy * max_rejection
-
-        # 2. Oracle Baseline
-        oracle_data = sorted(self.data, key=lambda x: x['metrics'][metric_key], reverse=True)
-        oracle_scores_list = [x['metrics'][metric_key] for x in oracle_data]
+        # Sort by Uncertainty (Low to High)
+        sorted_subset = sorted(data_subset, key=sorting_key)
         
-        o_rates, o_scores = self._compute_exact_curve(oracle_scores_list, max_rejection)
-        oracle_auc = self.calculate_auc(o_rates, o_scores)
-
-        # 3. Compute PRR
-        denominator = oracle_auc - random_auc
+        # Extract Scores
+        scores = [metric_evaluator(x) for x in sorted_subset]
         
-        if denominator <= 0:
-            return 0.0, random_auc, oracle_auc
+        return self._compute_exact_curve(scores, max_rejection)
+
+    def evaluate_metric(self, item, metric_name):
+        # Helper to compute EM/F1 on the fly since we didn't store it in 'metrics' dict for this script
+        # We assume the top cluster text is the prediction.
+        
+        # Sort clusters by prob to find top prediction
+        clusters = item['clusters']
+        if not clusters: return 0.0
+        clusters.sort(key=lambda x: x['prob'], reverse=True)
+        prediction = clusters[0]['text']
+        gold_list = item['gold']
+        if not isinstance(gold_list, list): gold_list = [gold_list]
+
+        if metric_name == 'exact_match':
+            # Simple normalization check
+            def norm(s): return "".join(s.lower().split())
+            return max([1.0 if norm(prediction) == norm(g) else 0.0 for g in gold_list])
             
-        prr = (model_auc - random_auc) / denominator
-        return prr, random_auc, oracle_auc
+        elif metric_name == 'f1_score':
+            # Simplified bag of words F1
+            def normalize_answer(s): return " ".join(s.lower().split())
+            best_f1 = 0.0
+            pred_toks = normalize_answer(prediction).split()
+            for gold in gold_list:
+                gold_toks = normalize_answer(gold).split()
+                common = set(pred_toks) & set(gold_toks)
+                num_same = len(common)
+                if num_same == 0: continue
+                precision = 1.0 * num_same / len(pred_toks)
+                recall = 1.0 * num_same / len(gold_toks)
+                f1 = (2 * precision * recall) / (precision + recall)
+                if f1 > best_f1: best_f1 = f1
+            return best_f1
+        return 0.0
 
-def plot_comparison(results, max_rejection, save_path):
-    """
-    Plots the results and saves to the specified save_path.
-    """
-    plt.figure(figsize=(12, 7))
+def plot_comparison(results_store, max_rejection, save_path):
+    plt.figure(figsize=(14, 8))
     
-    colors = {'exact_match': '#e74c3c', 'f1_score': '#2980b9'}
-    labels = {'exact_match': 'Exact Match', 'f1_score': 'F1 Score'}
+    # Colors: Method A (Solid), Method B (Dashed)
+    colors = {'exact_match': 'tab:red', 'f1_score': 'tab:blue'}
     
-    for metric, data in results.items():
-        x = np.array(data['rates']) * 100 
-        y = np.array(data['scores'])
-        
-        auc_val = data['auc']
-        prr_val = data['prr']
-        
-        label_text = f"{labels[metric]} (AUC: {auc_val:.3f} | PRR: {prr_val:.3f})"
-        plt.plot(x, y, linestyle='-', linewidth=2, color=colors[metric], label=label_text, alpha=0.7)
+    for metric_name in results_store:
+        # Method A
+        data_A = results_store[metric_name]['Method_A']
+        xA = np.array(data_A['rates']) * 100 
+        yA = np.array(data_A['scores'])
+        aucA = data_A['auc']
+        labelA = f"{metric_name} (Std SE) AUC: {aucA:.3f}"
+        plt.plot(xA, yA, linestyle='-', linewidth=2, color=colors[metric_name], label=labelA, alpha=0.8)
 
-    # Styling
-    plt.title('Semantic Entropy Rejection Curve', fontsize=16)
+        # Method B
+        data_B = results_store[metric_name]['Method_B']
+        xB = np.array(data_B['rates']) * 100 
+        yB = np.array(data_B['scores'])
+        aucB = data_B['auc']
+        labelB = f"{metric_name} (Cond SE) AUC: {aucB:.3f}"
+        plt.plot(xB, yB, linestyle='--', linewidth=2, color=colors[metric_name], label=labelB, alpha=0.8)
+
+    plt.title('Semantic Entropy: Standard (A) vs Conditional (B)', fontsize=16)
     plt.xlabel('Rejection Rate (%)', fontsize=12)
     plt.ylabel('Score of Retained Samples', fontsize=12)
     plt.grid(True, linestyle='--', alpha=0.5)
-    
-    plt.axvspan(0, max_rejection * 100, color='gray', alpha=0.1, label='Analyzed Range')
-    
-    plt.legend(fontsize=11)
+    plt.legend(fontsize=12)
     plt.tight_layout()
     
-    # Save to the directory provided in input
-    print(f"Saving figure to: {save_path}")
+    print(f"Saving comparison plot to: {save_path}")
     plt.savefig(save_path)
-    # plt.show() 
-
-# ---------------------------------------------------------
-# EXECUTION
-# ---------------------------------------------------------
 
 if __name__ == "__main__":
-    # 1. Parse Arguments
-    parser = argparse.ArgumentParser(description="Process Semantic Entropy results.")
-    parser.add_argument("directory", type=str, nargs='?', default=".", help="Directory containing the results file")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("filename", type=str, nargs='?', default="tinker_sem_entropy_abstention_results.json")
     args = parser.parse_args()
 
-    target_dir = args.directory
-    # Default output file from eval_semantic_entropy.py
-    json_filename = "tinker_sem_entropy_results.json" 
-    plot_filename = "sem_entropy_rejection_curve.png"
-
-    # 2. Construct Paths
-    input_path = os.path.join(target_dir, json_filename)
-    output_path = os.path.join(target_dir, plot_filename)
-    
-    MAX_REJECTION_THRESHOLD = 1.0
-    metrics_to_analyze = ['exact_match', 'f1_score']
-    results_store = {}
-
-    # 3. Validate Input File
+    input_path = args.filename
     if not os.path.exists(input_path):
-        print(f"Error: File '{json_filename}' not found in directory: {target_dir}")
-        print(f"Please run 'tinker/eval_semantic_entropy.py' first.")
+        print(f"File not found: {input_path}")
         sys.exit(1)
 
-    print(f"Loading data from: {input_path}")
+    print(f"Loading: {input_path}")
     with open(input_path, 'r') as f:
         data = json.load(f)
 
     processor = SemanticEntropyFilter(data)
     
-    print(f"\n{'Metric':<15} | {'Base Score':<10} | {'AUC':<10} | {'PRR':<10}")
-    print("-" * 55)
+    metrics = ['exact_match', 'f1_score']
+    results_store = {}
 
-    for metric in metrics_to_analyze:
-        # Calculate Curve
-        rates, scores = processor.calculate_rejection_curve(
-            metric_key=metric, 
-            max_rejection=MAX_REJECTION_THRESHOLD
-        )
+    for m in metrics:
+        results_store[m] = {}
         
-        # Calculate AUC
-        model_auc = processor.calculate_auc(rates, scores)
-        
-        # Calculate PRR
-        prr, random_auc, oracle_auc = processor.calculate_prr(
-            model_auc, 
-            metric_key=metric, 
-            max_rejection=MAX_REJECTION_THRESHOLD
+        # --- METHOD A: STANDARD ---
+        # Population: ALL
+        # Score: entropy
+        rates_A, scores_A = processor.calculate_rejection_curve(
+            data_subset=data,
+            sorting_key=lambda x: x.get('entropy', 100),
+            metric_evaluator=lambda x: processor.evaluate_metric(x, m)
         )
-
-        results_store[metric] = {
-            'rates': rates,
-            'scores': scores,
-            'auc': model_auc,
-            'prr': prr
+        results_store[m]['Method_A'] = {
+            'rates': rates_A, 'scores': scores_A, 
+            'auc': processor.calculate_auc(rates_A, scores_A)
         }
-        
-        base_score = scores[0] if len(scores) > 0 else 0
-        print(f"{metric:<15} | {base_score:<10.4f} | {model_auc:<10.4f} | {prr:<10.4f}")
 
-    # 4. Plot and Save
-    plot_comparison(results_store, MAX_REJECTION_THRESHOLD, output_path)
+        # --- METHOD B: CONDITIONAL ---
+        # Population: ONLY Non-Abstained
+        # Score: conditional_entropy
+        subset_B = [x for x in data if not x.get('is_abstention_decision', False)]
+        
+        if not subset_B:
+            print(f"Warning: No non-abstained samples found for Method B analysis.")
+            results_store[m]['Method_B'] = {'rates': [0], 'scores': [0], 'auc': 0}
+        else:
+            rates_B, scores_B = processor.calculate_rejection_curve(
+                data_subset=subset_B,
+                sorting_key=lambda x: x.get('conditional_entropy', 100),
+                metric_evaluator=lambda x: processor.evaluate_metric(x, m)
+            )
+            results_store[m]['Method_B'] = {
+                'rates': rates_B, 'scores': scores_B, 
+                'auc': processor.calculate_auc(rates_B, scores_B)
+            }
+
+    plot_comparison(results_store, 1.0, "se_abstention_comparison.png")
