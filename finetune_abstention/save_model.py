@@ -6,7 +6,7 @@ from transformers import (
 from peft import PeftModel
 
 MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
-NEW_MODEL_NAME = "Qwen2.5-7B-Instruct-HotpotQA-Abstention-CoT-10000"
+NEW_MODEL_NAME = "Qwen2.5-7B-Instruct-HotpotQA-Abstention-CoT-10000-90-10"
 HF_USERNAME = "fsiddiqui2" 
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
@@ -32,7 +32,7 @@ base_model = AutoModelForCausalLM.from_pretrained(
 
 # 2. Load the adapter using the base_model object
 # We use PeftModel directly instead of AutoPeftModel to utilize the base_model we just loaded
-model = PeftModel.from_pretrained(base_model, "./qwen_abstention_finetuned/final_adapter")
+model = PeftModel.from_pretrained(base_model, "./qwen_abstention_finetuned/hotpotqa-abstention-90-10_COT_lr0.0002_bs4_20251209_231306/final_adapter")
 
 # 3. Merge
 model = model.merge_and_unload()

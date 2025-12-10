@@ -97,10 +97,14 @@ def main():
     if not os.path.exists(adapter_path):
         raise FileNotFoundError(f"Could not find adapter files at: {adapter_path}")
 
-    # Generate output filenames based on the adapter folder name for uniqueness
-    run_name = os.path.basename(os.path.dirname(adapter_path)) # Gets the parent folder name
-    output_file = f"eval_results_{run_name}.json"
-    metrics_file = f"eval_metrics_{run_name}.json"
+    # Determine Output Directory (Parent of the adapter folder)
+    # e.g., if adapter_path is "./runs/run_name/final_adapter", output_dir is "./runs/run_name"
+    output_dir = os.path.dirname(adapter_path)
+    run_name = os.path.basename(output_dir) 
+
+    # Construct full paths for results
+    output_file_path = os.path.join(output_dir, f"eval_results_{run_name}.json")
+    metrics_file_path = os.path.join(output_dir, f"eval_metrics_{run_name}.json")
 
     print(f"Loading {DATASET_NAME} ({SUBSET_NAME})...")
     dataset = load_dataset(DATASET_NAME, SUBSET_NAME, split=SPLIT)
@@ -250,12 +254,12 @@ def main():
     print(f"Selective F1:    {selective_f1:.2f}%")
     print("="*30)
 
-    print(f"Saving detailed logs to {output_file}...")
-    with open(output_file, 'w', encoding='utf-8') as f:
+    print(f"Saving detailed logs to: {output_file_path}")
+    with open(output_file_path, 'w', encoding='utf-8') as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
     
-    print(f"Saving metrics to {metrics_file}...")
-    with open(metrics_file, 'w', encoding='utf-8') as f:
+    print(f"Saving metrics to: {metrics_file_path}")
+    with open(metrics_file_path, 'w', encoding='utf-8') as f:
         json.dump(final_metrics, f, indent=4)
         
     print("Done.")
