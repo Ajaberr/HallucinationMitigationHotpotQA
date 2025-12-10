@@ -4,6 +4,9 @@ import numpy as np
 import argparse
 import os
 import sys
+import re
+import string
+from collections import Counter
 from sklearn.metrics import auc
 
 class SemanticEntropyFilter:
@@ -66,35 +69,53 @@ class SemanticEntropyFilter:
         return self._compute_exact_curve(scores, max_rejection)
 
     def evaluate_metric(self, item, metric_name):
-        # Helper to compute EM/F1 on the fly since we didn't store it in 'metrics' dict for this script
+        # Helper to compute EM/F1 on the fly
         # We assume the top cluster text is the prediction.
         
-        # Sort clusters by prob to find top prediction
         clusters = item['clusters']
         if not clusters: return 0.0
+        # Sort by prob to find top prediction
         clusters.sort(key=lambda x: x['prob'], reverse=True)
         prediction = clusters[0]['text']
         gold_list = item['gold']
         if not isinstance(gold_list, list): gold_list = [gold_list]
 
+        # Normalization Utils (Ported from eval_abstention.py)
+        def normalize_answer(s):
+            def remove_articles(text): return re.sub(r'\b(a|an|the)\b', ' ', text)
+            def white_space_fix(text): return ' '.join(text.split())
+            def remove_punc(text): return ''.join(ch for ch in text if ch not in set(string.punctuation))
+            def lower(text): return text.lower()
+            return white_space_fix(remove_articles(remove_punc(lower(s))))
+        
+        norm_pred = normalize_answer(prediction)
+
         if metric_name == 'exact_match':
-            # Simple normalization check
-            def norm(s): return "".join(s.lower().split())
-            return max([1.0 if norm(prediction) == norm(g) else 0.0 for g in gold_list])
+            return max([1.0 if norm_pred == normalize_answer(g) else 0.0 for g in gold_list])
             
         elif metric_name == 'f1_score':
-            # Simplified bag of words F1
-            def normalize_answer(s): return " ".join(s.lower().split())
+            # F1 Score Logic
             best_f1 = 0.0
-            pred_toks = normalize_answer(prediction).split()
+            pred_toks = norm_pred.split()
             for gold in gold_list:
-                gold_toks = normalize_answer(gold).split()
-                common = set(pred_toks) & set(gold_toks)
-                num_same = len(common)
-                if num_same == 0: continue
-                precision = 1.0 * num_same / len(pred_toks)
-                recall = 1.0 * num_same / len(gold_toks)
-                f1 = (2 * precision * recall) / (precision + recall)
+                norm_gold = normalize_answer(gold)
+                # Special Case: Yes/No/NoAnswer
+                if norm_pred in ['yes', 'no', 'noanswer'] and norm_pred != norm_gold:
+                    continue
+                if norm_gold in ['yes', 'no', 'noanswer'] and norm_pred != norm_gold:
+                    continue
+                    
+                gold_toks = norm_gold.split()
+                common = Counter(pred_toks) & Counter(gold_toks)
+                num_same = sum(common.values())
+                
+                if num_same == 0: 
+                    f1 = 0.0
+                else:
+                    precision = 1.0 * num_same / len(pred_toks)
+                    recall = 1.0 * num_same / len(gold_toks)
+                    f1 = (2 * precision * recall) / (precision + recall)
+                
                 if f1 > best_f1: best_f1 = f1
             return best_f1
         return 0.0
