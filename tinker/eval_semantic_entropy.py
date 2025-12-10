@@ -179,29 +179,44 @@ def main():
             
             for seq in result.sequences:
                 # Decode Text
+                # Decode Text
                 text = tokenizer.decode(seq.tokens)
-                # Cleanup
-                if "assistant\n" in text: text = text.split("assistant\n")[-1]
-                text = text.replace("<|im_end|>", "").strip()
-                # Basic normalization
-                text = text.split("\n")[0].strip()
-                if "." in text: text = text.split(".")[0].strip()
+                
+                # Cleanup special tokens/prompts
+                if "assistant\n" in text: 
+                    text = text.split("assistant\n")[-1]
+                text = text.replace("<|im_end|>", "").replace("<|endoftext|>", "").strip()
+                
+                # --- CoT Parsing Logic (Mirrored from evaluate_cot.py) ---
+                parsed_answer = ""
+                
+                # Pattern 1: "Therefore, the answer is"
+                if "Therefore, the answer is" in text:
+                    parsed_answer = text.split("Therefore, the answer is")[-1].strip()
+                
+                # Pattern 2: VM Delimiter "-->"
+                elif " --> " in text:
+                    parsed_answer = text.split(" --> ")[1].strip()
+                
+                # Fallback: If no delimiter, use the whole text (likely fail, but avoids empty)
+                else: 
+                     parsed_answer = text.strip()
+
+                # Cleanup trailing period if present (common in sentence-ending answers)
+                if parsed_answer and parsed_answer.endswith("."):
+                    parsed_answer = parsed_answer[:-1]
+                
+                # Use the extracted answer for clustering/entropy
+                final_text = parsed_answer if parsed_answer else "NO_ANSWER_FOUND"
                 
                 # Get Probability
-                # seq.logprobs is List[float] (if requested? Tinker usually returns it by default in TokensWithLogprobs?)
-                # Wait, check Tinker types. TokensWithLogprobs usually has `logprobs` or `maybe_logprobs`.
-                # Assuming `seq.logprobs` exists and is populated.
-                # If not available, we assume uniform distribution (1/N) as fallback, but that defeats purpose.
-                # Let's verify `seq` has logprobs.
-                
-                # In tinker/types.py or docs: TokensWithLogprobs has `tokens: List[int]` and `logprobs: Optional[List[float]]`
+                # Check if seq has logprobs
                 if hasattr(seq, 'logprobs') and seq.logprobs:
                     prob = calculate_sequence_prob(seq.tokens, seq.logprobs)
                 else:
-                    # Fallback to uniform if API doesn't return logprobs (should confirm)
                     prob = 1.0 / NUM_SAMPLES_PER_QUESTION
                 
-                samples.append((text, prob))
+                samples.append((final_text, prob))
                 
             # Normalize probabilities to sum to 1 (across the N samples)
             total_prob = sum(p for t, p in samples)
