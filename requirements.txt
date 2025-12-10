@@ -14,3 +14,5 @@ huggingface_hub>=0.26.0
 # tinker>=0.5.1
 tensorboard
 vllm
+# vllm
+tinker
