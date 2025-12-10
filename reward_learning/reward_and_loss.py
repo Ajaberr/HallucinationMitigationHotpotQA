@@ -91,6 +91,44 @@ class FactualityVerifier:
         return p_ent, p_cont, f
 
 
+class AbstentionClassifier:
+    """
+    Classifier to detect abstention responses ("I don't know", refusals, etc.)
+    Uses NLI-based approach: checks if answer entails "I don't know the answer"
+    """
+
+    def __init__(self, verifier: FactualityVerifier):
+        """
+        Args:
+            verifier: Shared FactualityVerifier instance for NLI checking
+        """
+        self.verifier = verifier
+        self.abstention_premise = "I don't know the answer to this question."
+
+    @torch.no_grad()
+    def predict_proba(self, answers: List[str]) -> torch.Tensor:
+        """
+        Returns probability that each answer is an abstention.
+
+        Args:
+            answers: List of generated answers
+
+        Returns:
+            abstention_probs: Tensor of shape [B] with P(abstain | answer) in [0,1]
+        """
+        # Create abstention premise for each answer
+        premises = [self.abstention_premise for _ in answers]
+
+        # Check if answers entail "I don't know"
+        p_ent, p_cont, f = self.verifier.compute_factuality_score(
+            evidences=premises,
+            answers=answers
+        )
+
+        # Return entailment probability as abstention probability
+        return p_ent
+
+
 class EntropyConfidenceCalculator:
     """
     Computes entropy-based confidence from model logits.

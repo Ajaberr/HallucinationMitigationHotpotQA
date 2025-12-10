@@ -1,0 +1,11 @@
+{
+  "model": "fsiddiqui2/Qwen2.5-7B-Instruct-HotpotQA-Finetuned-Distractor-10000",
+  "dataset": "hotpot_qa",
+  "setting": "distractor",
+  "split": "validation",
+  "samples": 1000,
+  "EM": 21.0,
+  "F1": 30.36751379497587,
+  "Avg_RAUQ": 1.754874234855175,
+  "RAUQ_alpha": 0.2
+}
