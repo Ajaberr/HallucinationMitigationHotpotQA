@@ -1,0 +1,16 @@
+{
+    "base_model": "Qwen/Qwen2.5-7B-Instruct",
+    "adapter_path": "./qwen_abstention_finetuned/hotpotqa-abstention-80-20_SHORT_lr0.0002_bs4_20251210_020244/final_adapter",
+    "dataset": "hotpot_qa",
+    "samples": 7405,
+    "abstention_rate": 46.347062795408505,
+    "standard_metrics": {
+        "em": 20.378122889939227,
+        "f1": 26.04163666062485
+    },
+    "selective_metrics": {
+        "em": 37.981374276365464,
+        "f1": 48.46848819504434,
+        "answered_count": 3973
+    }
+}

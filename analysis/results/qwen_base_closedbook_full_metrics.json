@@ -1,0 +1,9 @@
+{
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "dataset": "hotpot_qa",
+  "setting": "distractor",
+  "split": "validation",
+  "samples": 7405,
+  "EM": 18.86563133018231,
+  "F1": 27.025245845181935
+}
