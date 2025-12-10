@@ -31,7 +31,7 @@ SUBSET_NAME = "distractor"
 SPLIT = "validation"
 # 10 Samples for Entropy Calculation (Standard)
 NUM_SAMPLES_PER_QUESTION = 10  
-TOTAL_EVAL_SAMPLES = 100 # Speed setting (Increase for full run)
+TOTAL_EVAL_SAMPLES = 50 # Speed setting (Increase for full run)
 
 # ABSTENTION FORMATTING
 DELIMITER_PROMPT = " ###\n"
