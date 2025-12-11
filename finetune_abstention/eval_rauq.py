@@ -20,7 +20,6 @@ SUBSET_NAME = "distractor"
 SPLIT = "validation"
 
 # Batching Configuration 
-# Lower batch size is necessary when output_attentions=True to prevent OOM
 BATCH_SIZE = 4 
 RAUQ_ALPHA = 0.2
 
@@ -28,7 +27,7 @@ RAUQ_ALPHA = 0.2
 DELIMITER_PROMPT = " ###\n"
 DELIMITER_ANSWER = " --> "
 DELIMITER_END = " END"
-REFUSAL_PHRASE = "i dont know"  # Normalized check string
+REFUSAL_PHRASE = "i dont know" 
 
 # Output Directory & Files
 RESULTS_DIR = "results"
@@ -36,34 +35,41 @@ OUTPUT_FILE = os.path.join(RESULTS_DIR, "qwen_abstention_cot_rauq_results.json")
 METRICS_FILE = os.path.join(RESULTS_DIR, "qwen_abstention_cot_rauq_metrics.json")
 
 # ==========================================
-# 2. RAUQ Implementation
+# 2. RAUQ Implementation (Fixed)
 # ==========================================
 
-def get_rauq_score_batch(sequences, scores, attentions, batch_idx, alpha=0.2):
+def get_rauq_score_batch(sequences, scores, attentions, batch_idx, alpha=0.2, tokenizer=None):
     """
-    Calculates RAUQ for a single item within a batch.
+    Calculates RAUQ for a single item within a batch, ignoring padding/EOS tokens.
     """
     if len(scores) == 0:
         return 0.0
 
-    # 1. Get Probabilities for the generated sequence
+    # 1. Identify the actual length of this specific sample
+    gen_tokens = sequences[batch_idx]
+    
+    stop_tokens = {tokenizer.eos_token_id, tokenizer.pad_token_id} if tokenizer else set()
+    
+    actual_length = len(gen_tokens)
+    for i, token_id in enumerate(gen_tokens):
+        if token_id.item() in stop_tokens:
+            actual_length = i
+            break
+    
+    # RAUQ requires at least 2 tokens (current + previous)
+    if actual_length < 2:
+        return 0.0
+
+    # 2. Get Probabilities (Truncated)
     probs = []
-    # scores is a tuple (one per step) of tensors (Batch, Vocab)
-    for i, step_logits in enumerate(scores):
+    for i in range(actual_length):
+        step_logits = scores[i]
         step_probs = F.softmax(step_logits, dim=-1)
-        # Sequence is already sliced to just generated tokens
-        token_id = sequences[batch_idx][i] 
+        token_id = gen_tokens[i] 
         token_prob = step_probs[batch_idx, token_id].item()
         probs.append(token_prob)
     
-    num_tokens = len(probs)
-    
-    # RAUQ requires at least 2 tokens (current + previous)
-    if num_tokens < 2:
-        return 0.0
-
-    # attentions structure: [step][layer][batch, heads, q_len, k_len]
-    # We assume 'eager' attention implementation where q_len=1
+    # 3. Compute RAUQ
     num_layers = len(attentions[0])
     layer_uncertainties = []
 
@@ -71,8 +77,8 @@ def get_rauq_score_batch(sequences, scores, attentions, batch_idx, alpha=0.2):
         # --- Step 1: Head Selection ---
         prev_token_attns = []
         
-        # Start at t=1 (second generated token) to look back at t=0
-        for t in range(1, num_tokens):
+        # Start at t=1 (second generated token)
+        for t in range(1, actual_length):
             attn_map = attentions[t][layer_idx] 
             # Extract attention to the previous token (index -2 in key dimension)
             attn_to_prev = attn_map[batch_idx, :, 0, -2]
@@ -91,9 +97,8 @@ def get_rauq_score_batch(sequences, scores, attentions, batch_idx, alpha=0.2):
         current_conf = probs[0] 
         confidences.append(current_conf)
         
-        for t in range(1, num_tokens):
+        for t in range(1, actual_length):
             prob_curr = probs[t]
-            # Get attention value of the "best head" for this specific step
             attn_val = attentions[t][layer_idx][batch_idx, best_head_idx, 0, -2].item()
             
             # The RAUQ recursion
@@ -142,7 +147,6 @@ def exact_match_score(prediction, ground_truth):
     return (normalize_answer(prediction) == normalize_answer(ground_truth))
 
 def check_abstention(prediction):
-    """Returns True if the prediction is a refusal."""
     norm_pred = normalize_answer(prediction)
     return REFUSAL_PHRASE in norm_pred
 
@@ -152,9 +156,7 @@ def check_abstention(prediction):
 
 def load_model(model_id):
     print(f"Loading model: {model_id}...")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # Must use 'eager' attention to get full attention weights for RAUQ
     kwargs = {
         "dtype": torch.bfloat16 if torch.cuda.is_available() and torch.cuda.get_device_properties(0).major >= 8 else torch.float16,
         "device_map": "auto",
@@ -168,25 +170,22 @@ def load_model(model_id):
         
     model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
     model.eval()
-    return tokenizer, model, device
+    return tokenizer, model
 
 def batch_data(dataset, batch_size):
     for i in range(0, len(dataset), batch_size):
         yield dataset[i : i + batch_size]
 
 def main():
-    # Ensure results directory exists
     if not os.path.exists(RESULTS_DIR):
         print(f"Creating output directory: {RESULTS_DIR}")
         os.makedirs(RESULTS_DIR, exist_ok=True)
 
-    tokenizer, model, device = load_model(MODEL_ID)
+    tokenizer, model = load_model(MODEL_ID)
+    device = model.device
     
     print(f"Loading {DATASET_NAME} ({SUBSET_NAME})...")
     dataset = load_dataset(DATASET_NAME, SUBSET_NAME, split=SPLIT)
-    
-    # Optional: Slice for testing
-    # dataset = dataset.select(range(50))
     
     print(f"Loaded {len(dataset)} samples.")
 
@@ -197,11 +196,8 @@ def main():
     total_abstentions = 0
     rauq_scores = []
     
-    # Selective Lists (only for non-abstained samples)
     selective_em_scores = []
     selective_f1_scores = []
-    
-    # Standard Lists (all samples)
     standard_em_scores = []
     standard_f1_scores = []
 
@@ -209,22 +205,19 @@ def main():
 
     for batch in tqdm(batch_data(dataset, BATCH_SIZE), total=(len(dataset) // BATCH_SIZE) + 1):
         
-        # 1. Prepare Batch Prompts
         questions = batch['question']
         ids = batch['id']
         golds = [a if isinstance(a, list) else [a] for a in batch['answer']]
         
         prompts = [f"{q}{DELIMITER_PROMPT}" for q in questions]
         
-        # 2. Tokenize
         inputs = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True).to(device)
         
-        # 3. Generate with Attentions
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=512,
-                do_sample=False, # Greedy
+                do_sample=False, 
                 output_attentions=True,
                 output_scores=True,
                 return_dict_in_generate=True,
@@ -233,52 +226,45 @@ def main():
                 tokenizer=tokenizer
             )
 
-        # 4. Process Batch Results
         gen_sequences = outputs.sequences[:, inputs['input_ids'].shape[1]:]
         
         for i, sequence in enumerate(gen_sequences):
-            # A. Decode Text
             full_text = tokenizer.decode(sequence, skip_special_tokens=True).strip()
             
-            # B. Calculate RAUQ
+            # --- FIXED CALL HERE ---
             rauq = get_rauq_score_batch(
                 sequences=gen_sequences,
                 scores=outputs.scores,
                 attentions=outputs.attentions,
                 batch_idx=i,
-                alpha=RAUQ_ALPHA
+                alpha=RAUQ_ALPHA,
+                tokenizer=tokenizer
             )
             rauq_scores.append(rauq)
             
-            # C. Parse Output (Matching Script 2 Logic)
+            # Parsing Logic
             reasoning_trace = ""
             predicted_answer = ""
             
-            # Case A: Model used CoT
             if DELIMITER_ANSWER in full_text:
                 parts = full_text.split(DELIMITER_ANSWER)
                 reasoning_trace = parts[0].strip()
                 if len(parts) > 1:
                     predicted_answer = parts[1].strip()
-            # Case B: Refusal or Malformed
             else:
                 reasoning_trace = ""
                 predicted_answer = full_text.strip()
             
-            # Cleanup
             predicted_answer = predicted_answer.replace("END", "").strip()
             if predicted_answer.endswith("."):
                 predicted_answer = predicted_answer[:-1]
 
-            # D. Check Abstention
             is_abstained = check_abstention(predicted_answer)
 
-            # E. Scoring
             current_golds = golds[i]
             em = max([float(exact_match_score(predicted_answer, g)) for g in current_golds])
             f1 = max([f1_score(predicted_answer, g)[0] for g in current_golds])
 
-            # F. Aggregate Metrics
             total_samples += 1
             standard_em_scores.append(em)
             standard_f1_scores.append(f1)
@@ -304,15 +290,11 @@ def main():
                 }
             })
 
-        # Memory Cleanup
         del outputs
         del inputs
         torch.cuda.empty_cache()
 
-    # ==========================================
-    # 5. Final Metrics & Save
-    # ==========================================
-    
+    # Final Metrics
     abstention_rate = (total_abstentions / total_samples) * 100 if total_samples > 0 else 0
     avg_rauq = sum(rauq_scores) / len(rauq_scores) if rauq_scores else 0.0
     

@@ -55,30 +55,43 @@ def load_model_and_tokenizer(model_id):
         return None, None
 
 # --- RAUQ Implementation ---
-def get_rauq_score_batch(sequences, scores, attentions, batch_idx, alpha=0.2):
+def get_rauq_score_batch(sequences, scores, attentions, batch_idx, alpha=0.2, tokenizer=None):
     """
-    Calculates RAUQ for a single item within a batch using HF generate outputs.
+    Calculates RAUQ for a single item within a batch, ignoring padding tokens.
     """
     if len(scores) == 0:
         return 0.0
 
-    # 1. Get Probabilities for the generated sequence
+    # 1. Identify the actual length of this specific sample
+    # We stop at the first occurrence of EOS or PAD in the generated sequence
+    gen_tokens = sequences[batch_idx]
+    
+    # Define stop tokens (EOS and PAD)
+    stop_tokens = {tokenizer.eos_token_id, tokenizer.pad_token_id} if tokenizer else set()
+    
+    actual_length = len(gen_tokens)
+    for i, token_id in enumerate(gen_tokens):
+        if token_id.item() in stop_tokens:
+            actual_length = i
+            break
+            
+    # If the sequence is too short (less than 2 tokens), we can't compute RAUQ 
+    # (needs current and previous). 
+    if actual_length < 2:
+        return 0.0
+
+    # 2. Get Probabilities only up to actual_length
     probs = []
-    # scores is a tuple (one per step) of tensors (Batch, Vocab)
-    for i, step_logits in enumerate(scores):
+    for i in range(actual_length):
+        step_logits = scores[i]
         step_probs = F.softmax(step_logits, dim=-1)
-        # Sequence is already sliced to just generated tokens
-        token_id = sequences[batch_idx][i] 
+        token_id = gen_tokens[i] 
         token_prob = step_probs[batch_idx, token_id].item()
         probs.append(token_prob)
     
-    num_tokens = len(probs)
-    
-    # RAUQ requires at least 2 tokens (current + previous)
-    if num_tokens < 2:
-        return 0.0
-
+    # 3. Compute RAUQ
     # attentions structure: [step][layer][batch, heads, q_len, k_len]
+    # We only look at attentions up to actual_length
     num_layers = len(attentions[0])
     layer_uncertainties = []
 
@@ -86,8 +99,8 @@ def get_rauq_score_batch(sequences, scores, attentions, batch_idx, alpha=0.2):
         # --- Step 1: Head Selection ---
         prev_token_attns = []
         
-        # Start at t=1 (second generated token) to look back at t=0
-        for t in range(1, num_tokens):
+        # Start at t=1 (second generated token) 
+        for t in range(1, actual_length):
             attn_map = attentions[t][layer_idx] 
             # Extract attention to the previous token (index -2 in key dimension)
             attn_to_prev = attn_map[batch_idx, :, 0, -2]
@@ -106,9 +119,9 @@ def get_rauq_score_batch(sequences, scores, attentions, batch_idx, alpha=0.2):
         current_conf = probs[0] 
         confidences.append(current_conf)
         
-        for t in range(1, num_tokens):
+        for t in range(1, actual_length):
             prob_curr = probs[t]
-            # Get attention value of the "best head" for this specific step
+            # Use the sliced limit for attentions loop as well
             attn_val = attentions[t][layer_idx][batch_idx, best_head_idx, 0, -2].item()
             
             # The RAUQ recursion
@@ -116,6 +129,7 @@ def get_rauq_score_batch(sequences, scores, attentions, batch_idx, alpha=0.2):
             confidences.append(current_conf)
             
         # --- Step 3: Sequence Aggregation ---
+        # Add epsilon to prevent log(0) if confidence is extremely low
         log_confs = [torch.log(torch.tensor(c + 1e-9)) for c in confidences]
         layer_u = -torch.mean(torch.stack(log_confs)).item()
         layer_uncertainties.append(layer_u)
@@ -245,7 +259,8 @@ def main():
                 scores=outputs.scores,
                 attentions=outputs.attentions,
                 batch_idx=b,
-                alpha=RAUQ_ALPHA
+                alpha=RAUQ_ALPHA,
+                tokenizer=tokenizer
             )
             
             all_gold_answers.append(current_gold)

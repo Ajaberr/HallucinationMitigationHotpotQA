@@ -21,7 +21,6 @@ SPLIT = "validation"
 RAUQ_ALPHA = 0.2
 
 # NOTE: BATCH_SIZE lowered to 4 because 'output_attentions=True' consumes significant VRAM.
-# If you have >48GB VRAM, you can try increasing this to 8 or 16.
 BATCH_SIZE = 4 
 
 # Output Setup
@@ -36,7 +35,6 @@ def load_model_and_tokenizer(model_id):
         "dtype": torch.bfloat16 if torch.cuda.is_available() and torch.cuda.get_device_properties(0).major >= 8 else torch.float16,
         "device_map": "auto",
         "low_cpu_mem_usage": True,
-        # MUST use 'eager' to get access to full attention weights for RAUQ
         "attn_implementation": "eager" 
     }
 
@@ -54,31 +52,40 @@ def load_model_and_tokenizer(model_id):
         print(f"Error loading model: {e}")
         return None, None
 
-# --- RAUQ Implementation ---
-def get_rauq_score_batch(sequences, scores, attentions, batch_idx, alpha=0.2):
+# --- RAUQ Implementation (Fixed) ---
+def get_rauq_score_batch(sequences, scores, attentions, batch_idx, alpha=0.2, tokenizer=None):
     """
-    Calculates RAUQ for a single item within a batch using HF generate outputs.
+    Calculates RAUQ for a single item within a batch, ignoring padding tokens.
     """
     if len(scores) == 0:
         return 0.0
 
-    # 1. Get Probabilities for the generated sequence
+    # 1. Identify the actual length of this specific sample
+    # We stop at the first occurrence of EOS or PAD in the generated sequence
+    gen_tokens = sequences[batch_idx]
+    
+    stop_tokens = {tokenizer.eos_token_id, tokenizer.pad_token_id} if tokenizer else set()
+    
+    actual_length = len(gen_tokens)
+    for i, token_id in enumerate(gen_tokens):
+        if token_id.item() in stop_tokens:
+            actual_length = i
+            break
+            
+    # RAUQ requires at least 2 tokens (current + previous)
+    if actual_length < 2:
+        return 0.0
+
+    # 2. Get Probabilities only up to actual_length
     probs = []
-    # scores is a tuple (one per step) of tensors (Batch, Vocab)
-    for i, step_logits in enumerate(scores):
+    for i in range(actual_length):
+        step_logits = scores[i]
         step_probs = F.softmax(step_logits, dim=-1)
-        # Sequence is already sliced to just generated tokens
-        token_id = sequences[batch_idx][i] 
+        token_id = gen_tokens[i] 
         token_prob = step_probs[batch_idx, token_id].item()
         probs.append(token_prob)
     
-    num_tokens = len(probs)
-    
-    # RAUQ requires at least 2 tokens (current + previous)
-    if num_tokens < 2:
-        return 0.0
-
-    # attentions structure: [step][layer][batch, heads, q_len, k_len]
+    # 3. Compute RAUQ using truncated length
     num_layers = len(attentions[0])
     layer_uncertainties = []
 
@@ -86,8 +93,8 @@ def get_rauq_score_batch(sequences, scores, attentions, batch_idx, alpha=0.2):
         # --- Step 1: Head Selection ---
         prev_token_attns = []
         
-        # Start at t=1 (second generated token) to look back at t=0
-        for t in range(1, num_tokens):
+        # Start at t=1 (second generated token)
+        for t in range(1, actual_length):
             attn_map = attentions[t][layer_idx] 
             # Extract attention to the previous token (index -2 in key dimension)
             attn_to_prev = attn_map[batch_idx, :, 0, -2]
@@ -106,9 +113,9 @@ def get_rauq_score_batch(sequences, scores, attentions, batch_idx, alpha=0.2):
         current_conf = probs[0] 
         confidences.append(current_conf)
         
-        for t in range(1, num_tokens):
+        for t in range(1, actual_length):
             prob_curr = probs[t]
-            # Get attention value of the "best head" for this specific step
+            # Use the sliced limit for attentions loop as well
             attn_val = attentions[t][layer_idx][batch_idx, best_head_idx, 0, -2].item()
             
             # The RAUQ recursion
@@ -116,6 +123,7 @@ def get_rauq_score_batch(sequences, scores, attentions, batch_idx, alpha=0.2):
             confidences.append(current_conf)
             
         # --- Step 3: Sequence Aggregation ---
+        # Add epsilon to prevent log(0)
         log_confs = [torch.log(torch.tensor(c + 1e-9)) for c in confidences]
         layer_u = -torch.mean(torch.stack(log_confs)).item()
         layer_uncertainties.append(layer_u)
@@ -167,7 +175,6 @@ def compute_metrics(gold_answers, pred_answers):
 
 # --- Main Logic ---
 def main():
-    # Ensure results directory exists
     if not os.path.exists(RESULTS_DIR):
         print(f"Creating output directory: {RESULTS_DIR}")
         os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -181,7 +188,6 @@ def main():
     total_samples = len(dataset)
     print(f"Loaded {total_samples} samples.")
     
-    # Helper to format prompts
     def format_batch_prompts(questions):
         prompts = []
         for q in questions:
@@ -192,7 +198,6 @@ def main():
             prompts.append(tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))
         return prompts
 
-    # Prepare Data Loader
     def collate_fn(batch):
         questions = [item['question'] for item in batch]
         gold_answers = [item['answer'] if isinstance(item['answer'], list) else [item['answer']] for item in batch]
@@ -210,11 +215,9 @@ def main():
 
     for batch_ids, questions, gold_answers in tqdm(dataloader, total=len(dataloader)):
         
-        # 1. Tokenize Batch
         prompts = format_batch_prompts(questions)
         inputs = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True).to(device)
 
-        # 2. Batch Generation
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
@@ -222,37 +225,33 @@ def main():
                 do_sample=False, 
                 num_beams=1,
                 pad_token_id=tokenizer.pad_token_id,
-                output_attentions=True,  # Required for RAUQ
-                output_scores=True,      # Required for RAUQ
+                output_attentions=True,
+                output_scores=True, 
                 return_dict_in_generate=True
             )
 
-        # 3. Process Batch Results
         input_len = inputs['input_ids'].shape[1]
-        
-        # Slice the generated sequences (remove prompt)
         gen_sequences = outputs.sequences[:, input_len:]
-        
         batch_decoded = tokenizer.batch_decode(gen_sequences, skip_special_tokens=True)
 
         for b in range(len(questions)):
             pred_text = batch_decoded[b].strip()
             current_gold = gold_answers[b]
             
-            # Calculate RAUQ
+            # --- FIXED CALL HERE: Passing tokenizer ---
             rauq = get_rauq_score_batch(
                 sequences=gen_sequences,
                 scores=outputs.scores,
                 attentions=outputs.attentions,
                 batch_idx=b,
-                alpha=RAUQ_ALPHA
+                alpha=RAUQ_ALPHA,
+                tokenizer=tokenizer 
             )
             
             all_gold_answers.append(current_gold)
             all_pred_answers.append(pred_text)
             rauq_scores.append(rauq)
 
-            # Metrics
             sample_em = max([float(exact_match_score(pred_text, gold)) for gold in current_gold])
             sample_f1 = max([f1_score(pred_text, gold)[0] for gold in current_gold])
 
@@ -268,12 +267,10 @@ def main():
                 }
             })
 
-        # Clear VRAM after every batch because attentions are huge
         del outputs
         del inputs
         torch.cuda.empty_cache()
 
-    # --- Final Computations ---
     metrics = compute_metrics(all_gold_answers, all_pred_answers)
     avg_rauq = sum(rauq_scores) / len(rauq_scores) if rauq_scores else 0.0
 

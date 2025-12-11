@@ -20,7 +20,6 @@ SUBSET_NAME = "distractor"
 SPLIT = "validation"
 
 # Batching Configuration 
-# (4-8 is usually safe for 24GB VRAM with output_attentions=True)
 BATCH_SIZE = 4 
 RAUQ_ALPHA = 0.2
 
@@ -35,34 +34,41 @@ OUTPUT_FILE = os.path.join(RESULTS_DIR, "qwen_ftcot_closedbook_rauq_results.json
 METRICS_FILE = os.path.join(RESULTS_DIR, "qwen_ftcot_closedbook_rauq_metrics.json")
 
 # ==========================================
-# 2. RAUQ Implementation (Adapted for Batching)
+# 2. RAUQ Implementation (Fixed)
 # ==========================================
 
-def get_rauq_score_batch(sequences, scores, attentions, batch_idx, alpha=0.2):
+def get_rauq_score_batch(sequences, scores, attentions, batch_idx, alpha=0.2, tokenizer=None):
     """
-    Calculates RAUQ for a single item within a batch.
+    Calculates RAUQ for a single item within a batch, ignoring padding/EOS tokens.
     """
     if len(scores) == 0:
         return 0.0
 
-    # 1. Get Probabilities for the generated sequence
-    probs = []
-    # scores is a tuple (one per step) of tensors (Batch, Vocab)
-    for i, step_logits in enumerate(scores):
-        step_probs = F.softmax(step_logits, dim=-1)
-        # Sequence is already sliced to just generated tokens
-        token_id = sequences[batch_idx][i] 
-        token_prob = step_probs[batch_idx, token_id].item()
-        probs.append(token_prob)
+    # 1. Identify the actual length of this specific sample
+    gen_tokens = sequences[batch_idx]
     
-    num_tokens = len(probs)
+    stop_tokens = {tokenizer.eos_token_id, tokenizer.pad_token_id} if tokenizer else set()
     
+    actual_length = len(gen_tokens)
+    for i, token_id in enumerate(gen_tokens):
+        if token_id.item() in stop_tokens:
+            actual_length = i
+            break
+            
     # RAUQ requires at least 2 tokens (current + previous)
-    if num_tokens < 2:
+    if actual_length < 2:
         return 0.0
 
-    # attentions structure: [step][layer][batch, heads, q_len, k_len]
-    # We assume 'eager' attention implementation where q_len=1
+    # 2. Get Probabilities (Truncated)
+    probs = []
+    for i in range(actual_length):
+        step_logits = scores[i]
+        step_probs = F.softmax(step_logits, dim=-1)
+        token_id = gen_tokens[i] 
+        token_prob = step_probs[batch_idx, token_id].item()
+        probs.append(token_prob)
+
+    # 3. Compute RAUQ
     num_layers = len(attentions[0])
     layer_uncertainties = []
 
@@ -70,12 +76,10 @@ def get_rauq_score_batch(sequences, scores, attentions, batch_idx, alpha=0.2):
         # --- Step 1: Head Selection ---
         prev_token_attns = []
         
-        # Start at t=1 (second generated token) to look back at t=0 (first generated token)
-        for t in range(1, num_tokens):
+        # Start at t=1 (second generated token)
+        for t in range(1, actual_length):
             attn_map = attentions[t][layer_idx] 
-            
             # Extract attention to the previous token (index -2 in key dimension)
-            # attn_map shape: [batch, heads, 1, keys]
             attn_to_prev = attn_map[batch_idx, :, 0, -2]
             prev_token_attns.append(attn_to_prev)
             
@@ -92,9 +96,9 @@ def get_rauq_score_batch(sequences, scores, attentions, batch_idx, alpha=0.2):
         current_conf = probs[0] 
         confidences.append(current_conf)
         
-        for t in range(1, num_tokens):
+        for t in range(1, actual_length):
             prob_curr = probs[t]
-            # Get attention value of the "best head" for this specific step
+            # Use the sliced limit for attentions loop as well
             attn_val = attentions[t][layer_idx][batch_idx, best_head_idx, 0, -2].item()
             
             # The RAUQ recursion
@@ -163,7 +167,6 @@ def load_model(model_id):
     print(f"Loading model: {model_id}...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # Must use 'eager' attention to get full attention weights for RAUQ
     kwargs = {
         "dtype": torch.bfloat16 if torch.cuda.is_available() and torch.cuda.get_device_properties(0).major >= 8 else torch.float16,
         "device_map": "auto",
@@ -171,7 +174,6 @@ def load_model(model_id):
     }
 
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-    # Important for batch generation
     tokenizer.padding_side = 'left'
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -185,7 +187,6 @@ def batch_data(dataset, batch_size):
         yield dataset[i : i + batch_size]
 
 def main():
-    # Ensure results directory exists
     if not os.path.exists(RESULTS_DIR):
         print(f"Creating output directory: {RESULTS_DIR}")
         os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -194,9 +195,6 @@ def main():
     
     print(f"Loading {DATASET_NAME} ({SUBSET_NAME})...")
     dataset = load_dataset(DATASET_NAME, SUBSET_NAME, split=SPLIT)
-    
-    # OPTIONAL: Testing slice
-    # dataset = dataset.select(range(50))
     
     print(f"Loaded {len(dataset)} samples.")
 
@@ -208,25 +206,21 @@ def main():
 
     print(f"Starting batched generation (Batch Size: {BATCH_SIZE})...")
 
-    # Iterate through dataset in batches
     for batch in tqdm(batch_data(dataset, BATCH_SIZE), total=(len(dataset) // BATCH_SIZE) + 1):
         
-        # 1. Prepare Batch Prompts
         questions = batch['question']
         ids = batch['id']
         golds = [a if isinstance(a, list) else [a] for a in batch['answer']]
         
         prompts = [f"{q}{DELIMITER_PROMPT}" for q in questions]
         
-        # 2. Tokenize
         inputs = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True).to(device)
         
-        # 3. Generate with Attentions
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=512,
-                do_sample=False, # Greedy
+                do_sample=False, 
                 output_attentions=True,
                 output_scores=True,
                 return_dict_in_generate=True,
@@ -235,26 +229,23 @@ def main():
                 tokenizer=tokenizer
             )
 
-        # 4. Process Batch Results
-        # Slice out the prompt to get just generated tokens
         gen_sequences = outputs.sequences[:, inputs['input_ids'].shape[1]:]
         
         for i, sequence in enumerate(gen_sequences):
-            # A. Decode Text
             full_text = tokenizer.decode(sequence, skip_special_tokens=True).strip()
             
-            # B. Calculate RAUQ
-            # Pass the batch index 'i' so RAUQ extracts the correct row from attentions
+            # --- FIXED CALL HERE ---
             rauq = get_rauq_score_batch(
                 sequences=gen_sequences,
                 scores=outputs.scores,
                 attentions=outputs.attentions,
                 batch_idx=i,
-                alpha=RAUQ_ALPHA
+                alpha=RAUQ_ALPHA,
+                tokenizer=tokenizer
             )
             rauq_scores.append(rauq)
             
-            # C. Parse Output (CoT Logic)
+            # Parsing logic
             reasoning_trace = ""
             predicted_answer = ""
             parse_success = False
@@ -271,7 +262,6 @@ def main():
                 format_errors += 1
                 reasoning_trace = full_text
             
-            # D. Scoring
             current_golds = golds[i]
             em = max([float(exact_match_score(predicted_answer, g)) for g in current_golds])
             f1 = max([f1_score(predicted_answer, g)[0] for g in current_golds])
@@ -294,15 +284,10 @@ def main():
                 "format_compliant": parse_success
             })
 
-        # Memory Cleanup (Critical when returning attentions)
         del outputs
         del inputs
         torch.cuda.empty_cache()
 
-    # ==========================================
-    # 5. Final Metrics & Save
-    # ==========================================
-    
     metrics = compute_metrics(all_gold_answers, all_pred_answers)
     avg_rauq = sum(rauq_scores) / len(rauq_scores) if rauq_scores else 0.0
     compliance_rate = ((len(dataset) - format_errors) / len(dataset)) * 100
