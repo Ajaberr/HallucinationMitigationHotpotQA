@@ -66,38 +66,68 @@ class SemanticEntropyFilter:
         return self._compute_exact_curve(scores, max_rejection)
 
     def evaluate_metric(self, item, metric_name):
-        # Helper to compute EM/F1 on the fly since we didn't store it in 'metrics' dict for this script
-        # We assume the top cluster text is the prediction.
+        # PRIORITY: Use valid pre-calculated metrics from the Greedy pass if available
+        # This ensures we are evaluating exactly what the baseline evaluated.
+        if 'metrics' in item:
+            if metric_name == 'exact_match':
+                return item['metrics'].get('em', 0.0)
+            elif metric_name == 'f1_score':
+                return item['metrics'].get('f1', 0.0)
+
+        # Fallback: Calculate from top cluster if metrics not found
+        clusters = item.get('clusters', [])
+        if not clusters: return 0.0
         
         # Sort clusters by prob to find top prediction
-        clusters = item['clusters']
-        if not clusters: return 0.0
         clusters.sort(key=lambda x: x['prob'], reverse=True)
         prediction = clusters[0]['text']
+        
         gold_list = item['gold']
         if not isinstance(gold_list, list): gold_list = [gold_list]
 
         if metric_name == 'exact_match':
-            # Simple normalization check
-            def norm(s): return "".join(s.lower().split())
-            return max([1.0 if norm(prediction) == norm(g) else 0.0 for g in gold_list])
+            return max([float(self.exact_match_score(prediction, g)) for g in gold_list])
             
         elif metric_name == 'f1_score':
-            # Simplified bag of words F1
-            def normalize_answer(s): return " ".join(s.lower().split())
-            best_f1 = 0.0
-            pred_toks = normalize_answer(prediction).split()
-            for gold in gold_list:
-                gold_toks = normalize_answer(gold).split()
-                common = set(pred_toks) & set(gold_toks)
-                num_same = len(common)
-                if num_same == 0: continue
-                precision = 1.0 * num_same / len(pred_toks)
-                recall = 1.0 * num_same / len(gold_toks)
-                f1 = (2 * precision * recall) / (precision + recall)
-                if f1 > best_f1: best_f1 = f1
-            return best_f1
+             return max([self.f1_score(prediction, g)[0] for g in gold_list])
+        
         return 0.0
+
+    # =========================================================
+    # RIGOROUS METRIC UTILS (Ported from eval_abstention.py)
+    # =========================================================
+    @staticmethod
+    def normalize_answer(s):
+        import re
+        import string
+        def remove_articles(text): return re.sub(r'\b(a|an|the)\b', ' ', text)
+        def white_space_fix(text): return ' '.join(text.split())
+        def remove_punc(text): return ''.join(ch for ch in text if ch not in set(string.punctuation))
+        def lower(text): return text.lower()
+        return white_space_fix(remove_articles(remove_punc(lower(s))))
+
+    @staticmethod
+    def f1_score(prediction, ground_truth):
+        normalized_prediction = SemanticEntropyFilter.normalize_answer(prediction)
+        normalized_ground_truth = SemanticEntropyFilter.normalize_answer(ground_truth)
+        if normalized_prediction in ['yes', 'no', 'noanswer'] and normalized_prediction != normalized_ground_truth:
+            return 0.0, 0.0, 0.0
+        if normalized_ground_truth in ['yes', 'no', 'noanswer'] and normalized_prediction != normalized_ground_truth:
+            return 0.0, 0.0, 0.0
+        prediction_tokens = normalized_prediction.split()
+        ground_truth_tokens = normalized_ground_truth.split()
+        from collections import Counter
+        common = Counter(prediction_tokens) & Counter(ground_truth_tokens)
+        num_same = sum(common.values())
+        if num_same == 0: return 0.0, 0.0, 0.0
+        precision = 1.0 * num_same / len(prediction_tokens)
+        recall = 1.0 * num_same / len(ground_truth_tokens)
+        f1 = (2 * precision * recall) / (precision + recall)
+        return f1, precision, recall
+
+    @staticmethod
+    def exact_match_score(prediction, ground_truth):
+        return (SemanticEntropyFilter.normalize_answer(prediction) == SemanticEntropyFilter.normalize_answer(ground_truth))
 
 def plot_comparison(results_store, max_rejection, save_path):
     plt.figure(figsize=(14, 8))
@@ -132,15 +162,47 @@ def plot_comparison(results_store, max_rejection, save_path):
     print(f"Saving comparison plot to: {save_path}")
     plt.savefig(save_path)
 
+    # ... (Keep existing class methods) ...
+    # We will add a new method for the Box Plot
+    def plot_abstention_correlation(self, save_path):
+        import seaborn as sns
+        
+        # Prepare Data
+        # We use the CONSENSUS decision for this correlation, as it derives from the same samples as Entropy
+        data_points = []
+        for x in self.data:
+            # Handle legacy or new format
+            if 'decisions' in x:
+                is_abstain = x['decisions']['consensus']['is_abstain']
+            else:
+                is_abstain = x.get('is_abstention_decision', False)
+                
+            status = "Abstained" if is_abstain else "Answered"
+            data_points.append({'Status': status, 'Entropy': x['entropy']})
+            
+        plt.figure(figsize=(8, 6))
+        # Box Plot
+        sns.boxplot(x='Status', y='Entropy', data=data_points, palette="Set2")
+        plt.title("Semantic Entropy Distribution: Abstained vs Answered")
+        plt.ylabel("Semantic Entropy (Uncertainty)")
+        plt.grid(True, linestyle='--', alpha=0.3)
+        
+        print(f"Saving correlation plot to: {save_path}")
+        plt.savefig(save_path)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("filename", type=str, nargs='?', default="tinker_sem_entropy_abstention_results.json")
+    parser.add_argument("filename", type=str, nargs='?', default="tinker/results/tinker_sem_entropy_abstention_results.json")
     args = parser.parse_args()
 
     input_path = args.filename
     if not os.path.exists(input_path):
-        print(f"File not found: {input_path}")
-        sys.exit(1)
+        # Check standard location
+        if os.path.exists("tinker_sem_entropy_abstention_results.json"):
+             input_path = "tinker_sem_entropy_abstention_results.json"
+        else:
+            print(f"File not found: {input_path}")
+            sys.exit(1)
 
     print(f"Loading: {input_path}")
     with open(input_path, 'r') as f:
@@ -148,42 +210,71 @@ if __name__ == "__main__":
 
     processor = SemanticEntropyFilter(data)
     
+    # --- PLOT 1: REJECTION CURVES (All Combinations) ---
     metrics = ['exact_match', 'f1_score']
-    results_store = {}
-
+    
     for m in metrics:
-        results_store[m] = {}
+        results_store = {}
         
-        # --- METHOD A: STANDARD ---
-        # Population: ALL
-        # Score: entropy
-        rates_A, scores_A = processor.calculate_rejection_curve(
+        # Helper to extract metric
+        def get_score(item, source='consensus', metric=m):
+            key = 'em' if metric == 'exact_match' else 'f1'
+            if 'decisions' in item:
+                return item['decisions'][source]['metrics'].get(key, 0.0)
+            return item.get('metrics', {}).get(key, 0.0) # Fallback
+
+        # 1. Greedy Acc vs Standard SE
+        rates_1, scores_1 = processor.calculate_rejection_curve(
             data_subset=data,
             sorting_key=lambda x: x.get('entropy', 100),
-            metric_evaluator=lambda x: processor.evaluate_metric(x, m)
+            metric_evaluator=lambda x: get_score(x, 'greedy')
         )
-        results_store[m]['Method_A'] = {
-            'rates': rates_A, 'scores': scores_A, 
-            'auc': processor.calculate_auc(rates_A, scores_A)
-        }
+        results_store['Greedy_StdSE'] = {'rates': rates_1, 'scores': scores_1, 'auc': processor.calculate_auc(rates_1, scores_1)}
 
-        # --- METHOD B: CONDITIONAL ---
-        # Population: ONLY Non-Abstained
-        # Score: conditional_entropy
-        subset_B = [x for x in data if not x.get('is_abstention_decision', False)]
-        
-        if not subset_B:
-            print(f"Warning: No non-abstained samples found for Method B analysis.")
-            results_store[m]['Method_B'] = {'rates': [0], 'scores': [0], 'auc': 0}
-        else:
-            rates_B, scores_B = processor.calculate_rejection_curve(
-                data_subset=subset_B,
+        # 2. Greedy Acc vs Conditional SE
+        rates_2, scores_2 = processor.calculate_rejection_curve(
+            data_subset=data,
+            sorting_key=lambda x: x.get('conditional_entropy', 100),
+            metric_evaluator=lambda x: get_score(x, 'greedy')
+        )
+        results_store['Greedy_CondSE'] = {'rates': rates_2, 'scores': scores_2, 'auc': processor.calculate_auc(rates_2, scores_2)}
+
+        # 3. Consensus Acc vs Standard SE
+        rates_3, scores_3 = processor.calculate_rejection_curve(
+            data_subset=data,
+            sorting_key=lambda x: x.get('entropy', 100),
+            metric_evaluator=lambda x: get_score(x, 'consensus')
+        )
+        results_store['Consensus_StdSE'] = {'rates': rates_3, 'scores': scores_3, 'auc': processor.calculate_auc(rates_3, scores_3)}
+
+        # 4. Consensus Acc vs Conditional SE (The "Knowledge" Curve)
+        # Filter: ONLY Non-Abstained Consensus Outcomes
+        subset_4 = [x for x in data if not x['decisions']['consensus']['is_abstain']]
+        if subset_4:
+            rates_4, scores_4 = processor.calculate_rejection_curve(
+                data_subset=subset_4,
                 sorting_key=lambda x: x.get('conditional_entropy', 100),
-                metric_evaluator=lambda x: processor.evaluate_metric(x, m)
+                metric_evaluator=lambda x: get_score(x, 'consensus')
             )
-            results_store[m]['Method_B'] = {
-                'rates': rates_B, 'scores': scores_B, 
-                'auc': processor.calculate_auc(rates_B, scores_B)
-            }
+            results_store['Consensus_CondSE_Selective'] = {'rates': rates_4, 'scores': scores_4, 'auc': processor.calculate_auc(rates_4, scores_4)}
+        else:
+            results_store['Consensus_CondSE_Selective'] = {'rates': [0], 'scores': [0], 'auc': 0}
 
-    plot_comparison(results_store, 1.0, "se_abstention_comparison.png")
+        # Plot All 4
+        plt.figure(figsize=(12, 8))
+        colors = {'Greedy_StdSE': 'red', 'Greedy_CondSE': 'orange', 'Consensus_StdSE': 'blue', 'Consensus_CondSE_Selective': 'green'}
+        styles = {'Greedy_StdSE': '--', 'Greedy_CondSE': ':', 'Consensus_StdSE': '-', 'Consensus_CondSE_Selective': '-.'}
+        
+        for name, res in results_store.items():
+            plt.plot(np.array(res['rates'])*100, res['scores'], label=f"{name} (AUC: {res['auc']:.3f})", color=colors.get(name,'black'), linestyle=styles.get(name, '-'))
+            
+        plt.title(f"{m} Rejection Curves (All Variants)")
+        plt.xlabel("Rejection Rate (%)")
+        plt.ylabel(f"Average {m}")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig(f"se_curves_{m}.png")
+        print(f"Saved se_curves_{m}.png")
+    
+    # --- PLOT 2: CORRELATION (Abstained vs Answered) ---
+    processor.plot_abstention_correlation("se_correlation_boxplot.png")

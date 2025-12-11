@@ -12,7 +12,7 @@
         "uri": "tinker://a13a33af-9a99-51bf-8447-722ab7aef0d4:train:0/sampler_weights/qwen-cot-distilled"
     },
     "qwen_hotpot_abstention_v1": {
-        "description": "Abstention Finetune (Mirrored from Teammate)",
+        "description": "Abstention Finetune",
         "uri": "tinker://ae03e418-7492-56f5-86ed-4c27a217c65d:train:0/sampler_weights/qwen-hotpot-abstention-adapter"
     }
 }

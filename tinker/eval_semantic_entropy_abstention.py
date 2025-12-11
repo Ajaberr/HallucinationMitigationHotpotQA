@@ -120,7 +120,7 @@ TOTAL_EVAL_SAMPLES = 50 # Speed setting (Increase for full run)
 DELIMITER_PROMPT = " ###\n"
 
 # NLI Model
-NLI_MODEL_NAME = "cross-encoder/nli-deberta-v3-xsmall"
+NLI_MODEL_NAME = "microsoft/deberta-large-mnli"
 
 OUTPUT_FILE = "tinker_sem_entropy_abstention_results.json"
 METRICS_FILE = "tinker_sem_entropy_abstention_metrics.json"
@@ -227,41 +227,42 @@ def main():
         input_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
         model_input = ttypes.ModelInput.from_ints(input_ids)
         
-        # --- PASS 1: GREEDY FOR DECISION (Sync with eval_abstention.py) ---
-        greedy_params = ttypes.SamplingParams(max_tokens=512, temperature=0.1)
+        # --- PASS 1: GREEDY FOR BASELINE ---
+        greedy_params = ttypes.SamplingParams(max_tokens=512, temperature=0.0) # Explicitly 0.0
+        greedy_res_obj = None
+        greedy_text = ""
+        greedy_is_abstain = False
+        greedy_metrics = {"em": 0.0, "f1": 0.0}
+
         try:
-            greedy_res = sampling_client.sample(model_input, 1, greedy_params).result()
-            greedy_text_raw = tokenizer.decode(greedy_res.sequences[0].tokens)
-            greedy_parsed = robust_parse_abstention_model(greedy_text_raw)
-            final_decision_text = greedy_parsed if greedy_parsed else "NO_ANSWER_FOUND"
+            greedy_res_obj = sampling_client.sample(model_input, 1, greedy_params).result()
+            greedy_raw = tokenizer.decode(greedy_res_obj.sequences[0].tokens)
+            greedy_text = robust_parse_abstention_model(greedy_raw)
+            if not greedy_text: greedy_text = "NO_ANSWER_FOUND"
             
-            # Use this for METRICS
-            is_abstention_decision = check_abstention(final_decision_text)
+            greedy_is_abstain = check_abstention(greedy_text)
             
             gold_answers = item['answer'] if isinstance(item['answer'], list) else [item['answer']]
-            best_em = max([float(exact_match_score(final_decision_text, g)) for g in gold_answers])
-            best_f1 = max([f1_score(final_decision_text, g)[0] for g in gold_answers])
             
-            # Track Aggregates
-            standard_em_scores.append(best_em)
-            standard_f1_scores.append(best_f1)
-            
-            if is_abstention_decision:
-                total_abstentions += 1
+            if greedy_is_abstain:
+                # If abstain, score is 0 unless gold is technically IDK
+                if any(check_abstention(g) for g in gold_answers):
+                     greedy_metrics = {"em": 1.0, "f1": 1.0}
             else:
-                selective_em_scores.append(best_em)
-                selective_f1_scores.append(best_f1)
-
+                greedy_metrics["em"] = max([float(exact_match_score(greedy_text, g)) for g in gold_answers])
+                greedy_metrics["f1"] = max([f1_score(greedy_text, g)[0] for g in gold_answers])
+                
         except Exception as e:
-            print(f"Error on greedy sample {i}: {e}")
-            continue
+            print(f"Error on greedy {i}: {e}")
 
-        # --- PASS 2: SAMPLING FOR ENTROPY ---
+        # --- PASS 2: SAMPLING FOR ENTROPY & CONSENSUS ---
         sampling_params = ttypes.SamplingParams(max_tokens=512, temperature=0.7, top_p=0.9)
         try:
             sample_res = sampling_client.sample(model_input, NUM_SAMPLES_PER_QUESTION, sampling_params).result()
             
             samples = []
+            raw_texts = []
+            
             for seq in sample_res.sequences:
                 text = tokenizer.decode(seq.tokens)
                 parsed = robust_parse_abstention_model(text)
@@ -273,97 +274,120 @@ def main():
                     prob = 1.0 / NUM_SAMPLES_PER_QUESTION
                 
                 samples.append((final_text, prob))
-                
+                raw_texts.append(final_text)
+
             # Normalize probs
             total_prob = sum(p for t, p in samples)
             if total_prob > 0:
                 samples = [(t, p/total_prob) for t, p in samples]
             
-            # 3. Cluster
-            clusters = clusterer.cluster_answers(samples)
+            # --- CONSENSUS LOGIC ---
+            # 1. Abstention Vote
+            idk_count = sum(1 for t, _ in samples if check_abstention(t))
+            consensus_is_abstain = idk_count >= (NUM_SAMPLES_PER_QUESTION / 2)
             
-            # 4. Metric A: Standard Semantic Entropy
+            # 2. Prediction Vote
+            clusterer_out = clusterer.cluster_answers(samples)
+            clusterer_out.sort(key=lambda x: x['prob'], reverse=True)
+            
+            consensus_text = ""
+            if consensus_is_abstain:
+                consensus_text = "I don't know"
+            else:
+                # Pick top NON-IDK cluster
+                found = False
+                for c in clusterer_out:
+                    if not check_abstention(c['text']):
+                        consensus_text = c['text']
+                        found = True
+                        break
+                if not found: consensus_text = clusterer_out[0]['text']
+
+            # 3. Consensus Metrics
+            consensus_metrics = {"em": 0.0, "f1": 0.0}
+            if consensus_is_abstain:
+                if any(check_abstention(g) for g in gold_answers):
+                    consensus_metrics = {"em": 1.0, "f1": 1.0}
+            else:
+                consensus_metrics["em"] = max([float(exact_match_score(consensus_text, g)) for g in gold_answers])
+                consensus_metrics["f1"] = max([f1_score(consensus_text, g)[0] for g in gold_answers])
+
+            # --- ENTROPY CALCULATION ---
+            # A. Standard (Total Uncertainty)
             entropy = 0.0
-            for c in clusters:
+            for c in clusterer_out:
                 p_c = c['prob']
-                if p_c > 0:
-                    entropy -= p_c * np.log(p_c)
+                if p_c > 0: entropy -= p_c * np.log(p_c)
             
-            # 5. Metric B: Conditional Semantic Entropy
-            non_abstain_clusters = []
-            for c in clusters:
-                # USE SAME ABSTENTION CHECK AS METRIC
-                if not check_abstention(c['text']):
-                     non_abstain_clusters.append(c)
-            
+            # B. Conditional (Knowledge Uncertainty)
+            non_abstain_clusters = [c for c in clusterer_out if not check_abstention(c['text'])]
             conditional_entropy = 0.0
             if non_abstain_clusters:
-                total_cond_prob = sum(c['prob'] for c in non_abstain_clusters)
-                if total_cond_prob > 1e-6:
+                total_cond = sum(c['prob'] for c in non_abstain_clusters)
+                if total_cond > 1e-6:
                     for c in non_abstain_clusters:
-                        norm_p = c['prob'] / total_cond_prob
-                        if norm_p > 0:
-                            conditional_entropy -= norm_p * np.log(norm_p)
-            else:
-                 conditional_entropy = 0.0
+                        norm_p = c['prob'] / total_cond
+                        if norm_p > 0: conditional_entropy -= norm_p * np.log(norm_p)
 
             results.append({
                 "question": question,
                 "gold": item['answer'],
                 "entropy": entropy, 
                 "conditional_entropy": conditional_entropy,
-                "is_abstention_decision": is_abstention_decision,
-                "metrics": {"em": best_em, "f1": best_f1},
-                "final_decision_text": final_decision_text,
-                "num_clusters": len(clusters),
-                "clusters": [{"text": c['text'], "prob": c['prob']} for c in clusters],
-                # "samples": [s[0] for s in samples] # Optional: reduce file size
+                
+                # METRICS BUNDLE
+                "decisions": {
+                    "greedy": {
+                        "text": greedy_text,
+                        "is_abstain": greedy_is_abstain,
+                        "metrics": greedy_metrics
+                    },
+                    "consensus": {
+                        "text": consensus_text,
+                        "is_abstain": consensus_is_abstain,
+                        "idk_prob": idk_count / NUM_SAMPLES_PER_QUESTION,
+                        "metrics": consensus_metrics
+                    }
+                },
+                
+                # Compatibility / Flat access (Prefer Decision Dict above)
+                "is_abstention_decision": consensus_is_abstain, # Default to consensus for legacy check? Or greedy?
+                # Actually, let's keep legacy keys pointing to CONSENSUS for safely running old scripts, 
+                # but our new script will use the 'decisions' dict.
+                
+                "clusters": [{"text": c['text'], "prob": c['prob']} for c in clusterer_out]
             })
 
         except Exception as e:
             print(f"Error on sampling {i}: {e}")
             continue
 
-    # --- FINAL STATISTICS CAULCULATION ---
-    total_samples = len(results)
-    if total_samples > 0:
-        abstention_rate = (total_abstentions / total_samples) * 100
-        std_em = np.mean(standard_em_scores) * 100
-        std_f1 = np.mean(standard_f1_scores) * 100
-        
-        sel_em = np.mean(selective_em_scores) * 100 if selective_em_scores else 0.0
-        sel_f1 = np.mean(selective_f1_scores) * 100 if selective_f1_scores else 0.0
-    else:
-        abstention_rate = std_em = std_f1 = sel_em = sel_f1 = 0.0
-
+    # --- FINAL STATISTICS ---
+    # We will print the Hybrid Stats
     print("\n" + "="*30)
-    print("FINAL SE RESULTS (Abstention Model)")
+    print("FINAL HYBRID RESULTS")
     print("="*30)
-    print(f"Abstention Rate: {abstention_rate:.2f}%")
-    print("-" * 20)
-    print(f"Standard EM:     {std_em:.2f}%")
-    print(f"Standard F1:     {std_f1:.2f}%")
-    print("-" * 20)
-    print(f"Selective EM:    {sel_em:.2f}%  (Accuracy on Answered)")
-    print(f"Selective F1:    {sel_f1:.2f}%")
+    
+    # helper
+    def get_avg(lst, key):
+        vals = [x['decisions'][key]['metrics']['em'] for x in results]
+        return np.mean(vals) * 100 if vals else 0.0
+
+    greedy_em = np.mean([x['decisions']['greedy']['metrics']['em'] for x in results]) * 100
+    cons_em = np.mean([x['decisions']['consensus']['metrics']['em'] for x in results]) * 100
+    
+    abst_greedy = sum(1 for x in results if x['decisions']['greedy']['is_abstain'])
+    abst_cons = sum(1 for x in results if x['decisions']['consensus']['is_abstain'])
+    
+    print(f"Samples: {len(results)}")
+    print(f"Greedy EM:    {greedy_em:.2f}%  (Abstain Rate: {abst_greedy/len(results)*100:.1f}%)")
+    print(f"Consensus EM: {cons_em:.2f}%  (Abstain Rate: {abst_cons/len(results)*100:.1f}%)")
     print("="*30)
 
     with open(OUTPUT_FILE, 'w') as f:
         json.dump(results, f, indent=2)
         
-    final_metrics = {
-        "model": ADAPTER_PATH,
-        "abstention_rate": abstention_rate,
-        "standard_em": std_em,
-        "standard_f1": std_f1,
-        "selective_em": sel_em,
-        "selective_f1": sel_f1
-    }
-    with open(METRICS_FILE, 'w') as f:
-        json.dump(final_metrics, f, indent=4)
-
-    print(f"Saved results to {OUTPUT_FILE}")
-    print(f"Saved metrics to {METRICS_FILE}")
+    print(f"Saved results with HYBRID metrics to {OUTPUT_FILE}")
 
 if __name__ == "__main__":
     main()
