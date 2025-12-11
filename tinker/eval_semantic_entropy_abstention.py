@@ -11,8 +11,45 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 import torch.nn.functional as F
 import re
 import string
+from collections import Counter
 
 load_dotenv()
+
+# ==========================================
+# 0. Metric Utils (Copied from eval_abstention.py)
+# ==========================================
+
+def normalize_answer(s):
+    def remove_articles(text): return re.sub(r'\b(a|an|the)\b', ' ', text)
+    def white_space_fix(text): return ' '.join(text.split())
+    def remove_punc(text): return ''.join(ch for ch in text if ch not in set(string.punctuation))
+    def lower(text): return text.lower()
+    return white_space_fix(remove_articles(remove_punc(lower(s))))
+
+def f1_score(prediction, ground_truth):
+    normalized_prediction = normalize_answer(prediction)
+    normalized_ground_truth = normalize_answer(ground_truth)
+    if normalized_prediction in ['yes', 'no', 'noanswer'] and normalized_prediction != normalized_ground_truth:
+        return 0.0, 0.0, 0.0
+    if normalized_ground_truth in ['yes', 'no', 'noanswer'] and normalized_prediction != normalized_ground_truth:
+        return 0.0, 0.0, 0.0
+    prediction_tokens = normalized_prediction.split()
+    ground_truth_tokens = normalized_ground_truth.split()
+    common = Counter(prediction_tokens) & Counter(ground_truth_tokens)
+    num_same = sum(common.values())
+    if num_same == 0: return 0.0, 0.0, 0.0
+    precision = 1.0 * num_same / len(prediction_tokens)
+    recall = 1.0 * num_same / len(ground_truth_tokens)
+    f1 = (2 * precision * recall) / (precision + recall)
+    return f1, precision, recall
+
+def exact_match_score(prediction, ground_truth):
+    return (normalize_answer(prediction) == normalize_answer(ground_truth))
+
+REFUSAL_PHRASE = "i dont know"
+def check_abstention(prediction):
+    norm_pred = normalize_answer(prediction)
+    return REFUSAL_PHRASE in norm_pred
 
 # ==========================================
 # 1. Configuration
@@ -41,6 +78,7 @@ DELIMITER_END = " END"
 NLI_MODEL_NAME = "cross-encoder/nli-deberta-v3-xsmall"
 
 OUTPUT_FILE = "tinker_sem_entropy_abstention_results.json"
+METRICS_FILE = "tinker_sem_entropy_abstention_metrics.json"
 
 # ==========================================
 # 2. NLI Clustering Logic (Shared)
@@ -177,6 +215,13 @@ def main():
     
     results = []
     
+    # Validation Metrics Storage
+    standard_em_scores = []
+    standard_f1_scores = []
+    selective_em_scores = []
+    selective_f1_scores = []
+    total_abstentions = 0
+    
     print(f"Starting eval loop for {len(dataset)} questions...")
     
     for i, item in tqdm(enumerate(dataset), total=len(dataset)):
@@ -262,11 +307,25 @@ def main():
             # Sort clusters by prob
             clusters.sort(key=lambda x: x['prob'], reverse=True)
             top_cluster = clusters[0]
-            is_abstention_decision = "i dont know" in top_cluster['text'].lower().replace("'", "")
+            prediction_text = top_cluster['text']
             
-            # Accuracy of Top Cluster (Method B pre-req)
-            # We assume the model 'prediction' is the top cluster text
-            # Calculate metrics later in analysis script, just store data here.
+            # --- METRIC CALCULATION (Same as eval_abstention.py) ---
+            is_abstention_decision = check_abstention(prediction_text)
+            
+            gold_answers = item['answer'] if isinstance(item['answer'], list) else [item['answer']]
+            
+            # Best match against any valid gold answer
+            best_em = max([float(exact_match_score(prediction_text, g)) for g in gold_answers])
+            best_f1 = max([f1_score(prediction_text, g)[0] for g in gold_answers])
+            
+            standard_em_scores.append(best_em)
+            standard_f1_scores.append(best_f1)
+            
+            if is_abstention_decision:
+                total_abstentions += 1
+            else:
+                selective_em_scores.append(best_em)
+                selective_f1_scores.append(best_f1)
 
             results.append({
                 "question": question,
@@ -274,6 +333,7 @@ def main():
                 "entropy": entropy, # Method A
                 "conditional_entropy": conditional_entropy, # Method B
                 "is_abstention_decision": is_abstention_decision,
+                "metrics": {"em": best_em, "f1": best_f1},
                 "num_clusters": len(clusters),
                 "num_non_abstain_clusters": len(non_abstain_clusters),
                 "clusters": [{"text": c['text'], "prob": c['prob']} for c in clusters],
@@ -284,10 +344,46 @@ def main():
             print(f"Error on sample {i}: {e}")
             continue
 
+    # --- FINAL STATISTICS CAULCULATION ---
+    total_samples = len(results)
+    if total_samples > 0:
+        abstention_rate = (total_abstentions / total_samples) * 100
+        std_em = np.mean(standard_em_scores) * 100
+        std_f1 = np.mean(standard_f1_scores) * 100
+        
+        sel_em = np.mean(selective_em_scores) * 100 if selective_em_scores else 0.0
+        sel_f1 = np.mean(selective_f1_scores) * 100 if selective_f1_scores else 0.0
+    else:
+        abstention_rate = std_em = std_f1 = sel_em = sel_f1 = 0.0
+
+    print("\n" + "="*30)
+    print("FINAL SE RESULTS (Abstention Model)")
+    print("="*30)
+    print(f"Abstention Rate: {abstention_rate:.2f}%")
+    print("-" * 20)
+    print(f"Standard EM:     {std_em:.2f}%")
+    print(f"Standard F1:     {std_f1:.2f}%")
+    print("-" * 20)
+    print(f"Selective EM:    {sel_em:.2f}%  (Accuracy on Answered)")
+    print(f"Selective F1:    {sel_f1:.2f}%")
+    print("="*30)
+
     with open(OUTPUT_FILE, 'w') as f:
         json.dump(results, f, indent=2)
         
+    final_metrics = {
+        "model": ADAPTER_PATH,
+        "abstention_rate": abstention_rate,
+        "standard_em": std_em,
+        "standard_f1": std_f1,
+        "selective_em": sel_em,
+        "selective_f1": sel_f1
+    }
+    with open(METRICS_FILE, 'w') as f:
+        json.dump(final_metrics, f, indent=4)
+
     print(f"Saved results to {OUTPUT_FILE}")
+    print(f"Saved metrics to {METRICS_FILE}")
 
 if __name__ == "__main__":
     main()
