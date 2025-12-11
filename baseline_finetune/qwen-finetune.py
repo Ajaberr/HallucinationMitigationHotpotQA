@@ -18,7 +18,7 @@ MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
 DATASET_NAME = "hotpot_qa"
 SUBSET_NAME = "distractor"
 SPLIT = "train"
-NUM_SAMPLES = 10000
+NUM_SAMPLES = 50
 OUTPUT_DIR="./qwen_hotpot_finetuned"
 
 # --- 1. Load Tokenizer & Dataset ---
