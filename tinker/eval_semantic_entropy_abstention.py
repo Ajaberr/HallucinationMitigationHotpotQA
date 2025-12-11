@@ -11,8 +11,91 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 import torch.nn.functional as F
 import re
 import string
+from collections import Counter
 
 load_dotenv()
+
+# ==========================================
+# 0. Metric Utils (EXACTLY from eval_abstention.py)
+# ==========================================
+
+def normalize_answer(s):
+    def remove_articles(text): return re.sub(r'\b(a|an|the)\b', ' ', text)
+    def white_space_fix(text): return ' '.join(text.split())
+    def remove_punc(text): return ''.join(ch for ch in text if ch not in set(string.punctuation))
+    def lower(text): return text.lower()
+    return white_space_fix(remove_articles(remove_punc(lower(s))))
+
+def f1_score(prediction, ground_truth):
+    normalized_prediction = normalize_answer(prediction)
+    normalized_ground_truth = normalize_answer(ground_truth)
+    if normalized_prediction in ['yes', 'no', 'noanswer'] and normalized_prediction != normalized_ground_truth:
+        return 0.0, 0.0, 0.0
+    if normalized_ground_truth in ['yes', 'no', 'noanswer'] and normalized_prediction != normalized_ground_truth:
+        return 0.0, 0.0, 0.0
+    prediction_tokens = normalized_prediction.split()
+    ground_truth_tokens = normalized_ground_truth.split()
+    common = Counter(prediction_tokens) & Counter(ground_truth_tokens)
+    num_same = sum(common.values())
+    if num_same == 0: return 0.0, 0.0, 0.0
+    precision = 1.0 * num_same / len(prediction_tokens)
+    recall = 1.0 * num_same / len(ground_truth_tokens)
+    f1 = (2 * precision * recall) / (precision + recall)
+    return f1, precision, recall
+
+def exact_match_score(prediction, ground_truth):
+    return (normalize_answer(prediction) == normalize_answer(ground_truth))
+
+REFUSAL_PHRASE = "i dont know"
+def check_abstention(prediction):
+    norm_pred = normalize_answer(prediction)
+    return REFUSAL_PHRASE in norm_pred
+
+def robust_parse_abstention_model(output_text):
+    # 1. Cleanup special tokens
+    output_text = output_text.replace("<|im_end|>", "").replace("<|endoftext|>", "")
+    if "assistant\n" in output_text:
+        output_text = output_text.split("assistant\n")[-1]
+
+    # 2. Check for " END" delimiter (from training)
+    if " END" in output_text:
+        output_text = output_text.split(" END")[0]
+    
+    output_text = output_text.strip()
+    
+    # 3. Robust Parsing
+    # Normalize dashes to standard hyphen to catch en-dash, em-dash, etc.
+    normalized_text = output_text.replace("\u2013", "-").replace("\u2014", "-").replace("\u2212", "-")
+    
+    parsed_answer = ""
+    
+    # Regex for arrow (handle variable spacing)
+    arrow_match = re.search(r"\s*-{2,}>\s*", normalized_text)
+    
+    # PRIORITY 1: The Training Delimiter "-->"
+    if arrow_match:
+        parts = re.split(r"\s*-{2,}>\s*", normalized_text)
+        parsed_answer = parts[-1].strip()
+    
+    # PRIORITY 2: Heuristic "Therefore..." (Only if arrow missing)
+    elif "Therefore, the answer is" in normalized_text:
+        parsed_answer = normalized_text.split("Therefore, the answer is")[-1].strip()
+    
+    elif "The answer is" in normalized_text:
+        parsed_answer = normalized_text.split("The answer is")[-1].strip()
+    
+    else:
+        # Fallback
+        if "Step" in normalized_text: 
+            parsed_answer = "" 
+        else:
+            parsed_answer = normalized_text
+
+    # Final Cleanup
+    if parsed_answer.endswith("."):
+        parsed_answer = parsed_answer[:-1]
+    
+    return parsed_answer.strip()
 
 # ==========================================
 # 1. Configuration
@@ -35,12 +118,12 @@ TOTAL_EVAL_SAMPLES = 50 # Speed setting (Increase for full run)
 
 # ABSTENTION FORMATTING
 DELIMITER_PROMPT = " ###\n"
-DELIMITER_END = " END"
 
 # NLI Model
 NLI_MODEL_NAME = "cross-encoder/nli-deberta-v3-xsmall"
 
 OUTPUT_FILE = "tinker_sem_entropy_abstention_results.json"
+METRICS_FILE = "tinker_sem_entropy_abstention_metrics.json"
 
 # ==========================================
 # 2. NLI Clustering Logic (Shared)
@@ -97,56 +180,6 @@ class SemanticClusterer:
                 })
         return clusters
 
-# ==========================================
-# 3. Robust Parsing (Ported from eval_abstention.py)
-# ==========================================
-
-def robust_parse_abstention_model(output_text):
-    # 1. Cleanup special tokens
-    output_text = output_text.replace("<|im_end|>", "").replace("<|endoftext|>", "")
-    if "assistant\n" in output_text:
-        output_text = output_text.split("assistant\n")[-1]
-
-    # 2. Check for " END" delimiter (from training)
-    if " END" in output_text:
-        output_text = output_text.split(" END")[0]
-    
-    output_text = output_text.strip()
-    
-    # 3. Robust Parsing
-    # Normalize dashes to standard hyphen to catch en-dash, em-dash, etc.
-    normalized_text = output_text.replace("\u2013", "-").replace("\u2014", "-").replace("\u2212", "-")
-    
-    parsed_answer = ""
-    
-    # Regex for arrow (handle variable spacing)
-    arrow_match = re.search(r"\s*-{2,}>\s*", normalized_text)
-    
-    # PRIORITY 1: The Training Delimiter "-->"
-    if arrow_match:
-        parts = re.split(r"\s*-{2,}>\s*", normalized_text)
-        parsed_answer = parts[-1].strip()
-    
-    # PRIORITY 2: Heuristic "Therefore..." (Only if arrow missing)
-    elif "Therefore, the answer is" in normalized_text:
-        parsed_answer = normalized_text.split("Therefore, the answer is")[-1].strip()
-    
-    elif "The answer is" in normalized_text:
-        parsed_answer = normalized_text.split("The answer is")[-1].strip()
-    
-    else:
-        # Fallback
-        if "Step" in normalized_text: 
-            parsed_answer = "" 
-        else:
-            parsed_answer = normalized_text
-
-    # Final Cleanup
-    if parsed_answer.endswith("."):
-        parsed_answer = parsed_answer[:-1]
-    
-    return parsed_answer.strip()
-
 def calculate_sequence_prob(token_ids, logprobs):
     total_logprob = sum(logprobs)
     return np.exp(total_logprob)
@@ -177,6 +210,13 @@ def main():
     
     results = []
     
+    # Validation Metrics Storage
+    standard_em_scores = []
+    standard_f1_scores = []
+    selective_em_scores = []
+    selective_f1_scores = []
+    total_abstentions = 0
+    
     print(f"Starting eval loop for {len(dataset)} questions...")
     
     for i, item in tqdm(enumerate(dataset), total=len(dataset)):
@@ -187,29 +227,46 @@ def main():
         input_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
         model_input = ttypes.ModelInput.from_ints(input_ids)
         
-        # 2. Generate N Samples
-        sampling_params = ttypes.SamplingParams(
-            max_tokens=512,  # Long generation for CoT
-            temperature=0.7, # Diversity needed for Entropy
-            top_p=0.9
-        )
-        
+        # --- PASS 1: GREEDY FOR DECISION (Sync with eval_abstention.py) ---
+        greedy_params = ttypes.SamplingParams(max_tokens=512, temperature=0.1)
         try:
-            result = sampling_client.sample(model_input, NUM_SAMPLES_PER_QUESTION, sampling_params).result()
+            greedy_res = sampling_client.sample(model_input, 1, greedy_params).result()
+            greedy_text_raw = tokenizer.decode(greedy_res.sequences[0].tokens)
+            greedy_parsed = robust_parse_abstention_model(greedy_text_raw)
+            final_decision_text = greedy_parsed if greedy_parsed else "NO_ANSWER_FOUND"
+            
+            # Use this for METRICS
+            is_abstention_decision = check_abstention(final_decision_text)
+            
+            gold_answers = item['answer'] if isinstance(item['answer'], list) else [item['answer']]
+            best_em = max([float(exact_match_score(final_decision_text, g)) for g in gold_answers])
+            best_f1 = max([f1_score(final_decision_text, g)[0] for g in gold_answers])
+            
+            # Track Aggregates
+            standard_em_scores.append(best_em)
+            standard_f1_scores.append(best_f1)
+            
+            if is_abstention_decision:
+                total_abstentions += 1
+            else:
+                selective_em_scores.append(best_em)
+                selective_f1_scores.append(best_f1)
+
+        except Exception as e:
+            print(f"Error on greedy sample {i}: {e}")
+            continue
+
+        # --- PASS 2: SAMPLING FOR ENTROPY ---
+        sampling_params = ttypes.SamplingParams(max_tokens=512, temperature=0.7, top_p=0.9)
+        try:
+            sample_res = sampling_client.sample(model_input, NUM_SAMPLES_PER_QUESTION, sampling_params).result()
             
             samples = []
-            
-            for seq in result.sequences:
-                # Decode
+            for seq in sample_res.sequences:
                 text = tokenizer.decode(seq.tokens)
+                parsed = robust_parse_abstention_model(text)
+                final_text = parsed if parsed else "NO_ANSWER_FOUND"
                 
-                # Parse
-                parsed_answer = robust_parse_abstention_model(text)
-                
-                # Store
-                final_text = parsed_answer if parsed_answer else "NO_ANSWER_FOUND"
-                
-                # Prob
                 if hasattr(seq, 'logprobs') and seq.logprobs:
                     prob = calculate_sequence_prob(seq.tokens, seq.logprobs)
                 else:
@@ -225,69 +282,88 @@ def main():
             # 3. Cluster
             clusters = clusterer.cluster_answers(samples)
             
-            # 3. Cluster
-            clusters = clusterer.cluster_answers(samples)
-            
-            # 4. Metric A: Standard Semantic Entropy (Includes IDK as a cluster)
+            # 4. Metric A: Standard Semantic Entropy
             entropy = 0.0
             for c in clusters:
                 p_c = c['prob']
                 if p_c > 0:
                     entropy -= p_c * np.log(p_c)
             
-            # 5. Metric B: Conditional Semantic Entropy (Gated)
-            # Entropy given that the model provided an answer (ignore IDK clusters)
+            # 5. Metric B: Conditional Semantic Entropy
             non_abstain_clusters = []
             for c in clusters:
-                # Check directly for refusal phrase in the cluster representative text
-                if "i dont know" not in c['text'].lower().replace("'", ""):
+                # USE SAME ABSTENTION CHECK AS METRIC
+                if not check_abstention(c['text']):
                      non_abstain_clusters.append(c)
             
             conditional_entropy = 0.0
             if non_abstain_clusters:
                 total_cond_prob = sum(c['prob'] for c in non_abstain_clusters)
-                # If total prob is tiny, it means model almost always abstained. 
-                # In that case, conditional entropy is technically undefined or 0? 
-                # Let's normalize if significant mass exists.
                 if total_cond_prob > 1e-6:
                     for c in non_abstain_clusters:
                         norm_p = c['prob'] / total_cond_prob
                         if norm_p > 0:
                             conditional_entropy -= norm_p * np.log(norm_p)
             else:
-                 # All answers were IDK. Conditional entropy is 0 (or undefined).
                  conditional_entropy = 0.0
-
-            # Additional Metric: Is the most likely cluster "I don't know"?
-            # Sort clusters by prob
-            clusters.sort(key=lambda x: x['prob'], reverse=True)
-            top_cluster = clusters[0]
-            is_abstention_decision = "i dont know" in top_cluster['text'].lower().replace("'", "")
-            
-            # Accuracy of Top Cluster (Method B pre-req)
-            # We assume the model 'prediction' is the top cluster text
-            # Calculate metrics later in analysis script, just store data here.
 
             results.append({
                 "question": question,
                 "gold": item['answer'],
-                "entropy": entropy, # Method A
-                "conditional_entropy": conditional_entropy, # Method B
+                "entropy": entropy, 
+                "conditional_entropy": conditional_entropy,
                 "is_abstention_decision": is_abstention_decision,
+                "metrics": {"em": best_em, "f1": best_f1},
+                "final_decision_text": final_decision_text,
                 "num_clusters": len(clusters),
-                "num_non_abstain_clusters": len(non_abstain_clusters),
                 "clusters": [{"text": c['text'], "prob": c['prob']} for c in clusters],
-                "samples": [s[0] for s in samples]
+                # "samples": [s[0] for s in samples] # Optional: reduce file size
             })
 
         except Exception as e:
-            print(f"Error on sample {i}: {e}")
+            print(f"Error on sampling {i}: {e}")
             continue
+
+    # --- FINAL STATISTICS CAULCULATION ---
+    total_samples = len(results)
+    if total_samples > 0:
+        abstention_rate = (total_abstentions / total_samples) * 100
+        std_em = np.mean(standard_em_scores) * 100
+        std_f1 = np.mean(standard_f1_scores) * 100
+        
+        sel_em = np.mean(selective_em_scores) * 100 if selective_em_scores else 0.0
+        sel_f1 = np.mean(selective_f1_scores) * 100 if selective_f1_scores else 0.0
+    else:
+        abstention_rate = std_em = std_f1 = sel_em = sel_f1 = 0.0
+
+    print("\n" + "="*30)
+    print("FINAL SE RESULTS (Abstention Model)")
+    print("="*30)
+    print(f"Abstention Rate: {abstention_rate:.2f}%")
+    print("-" * 20)
+    print(f"Standard EM:     {std_em:.2f}%")
+    print(f"Standard F1:     {std_f1:.2f}%")
+    print("-" * 20)
+    print(f"Selective EM:    {sel_em:.2f}%  (Accuracy on Answered)")
+    print(f"Selective F1:    {sel_f1:.2f}%")
+    print("="*30)
 
     with open(OUTPUT_FILE, 'w') as f:
         json.dump(results, f, indent=2)
         
+    final_metrics = {
+        "model": ADAPTER_PATH,
+        "abstention_rate": abstention_rate,
+        "standard_em": std_em,
+        "standard_f1": std_f1,
+        "selective_em": sel_em,
+        "selective_f1": sel_f1
+    }
+    with open(METRICS_FILE, 'w') as f:
+        json.dump(final_metrics, f, indent=4)
+
     print(f"Saved results to {OUTPUT_FILE}")
+    print(f"Saved metrics to {METRICS_FILE}")
 
 if __name__ == "__main__":
     main()
