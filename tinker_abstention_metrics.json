@@ -1,8 +1,0 @@
-{
-    "model": "tinker://ae03e418-7492-56f5-86ed-4c27a217c65d:train:0/sampler_weights/qwen-hotpot-abstention-adapter",
-    "abstention_rate": 44.17285617825794,
-    "standard_em": 20.594193112761648,
-    "standard_f1": 26.743068168955098,
-    "selective_em": 36.88921141751331,
-    "selective_f1": 47.84657408113932
-}

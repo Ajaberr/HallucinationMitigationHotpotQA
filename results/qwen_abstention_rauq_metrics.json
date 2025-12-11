@@ -1,0 +1,16 @@
+{
+  "model": "fsiddiqui2/Qwen2.5-7B-Instruct-HotpotQA-Abstention-10000-80-20",
+  "dataset": "hotpot_qa",
+  "samples": 7405,
+  "abstention_rate": 47.400405131667796,
+  "Avg_RAUQ": 4.216927958661684,
+  "standard_metrics": {
+    "em": 19.83794733288319,
+    "f1": 25.21917484181716
+  },
+  "selective_metrics": {
+    "em": 37.715019255455715,
+    "f1": 47.86905618244935,
+    "answered_count": 3895
+  }
+}
