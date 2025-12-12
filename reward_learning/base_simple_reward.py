@@ -537,6 +537,10 @@ class SimpleRLTrainer:
             lr=config.learning_rate
         ) if reward_model is not None else None
 
+        # Learning rate scheduler (cosine annealing with warmup)
+        # Will be properly initialized with total_steps in train() method
+        self.scheduler = None
+
         # Mixed precision training scaler
         self.scaler = torch.cuda.amp.GradScaler() if reward_model is not None else None
 
@@ -579,6 +583,7 @@ class SimpleRLTrainer:
             'current_step': self.current_step,
             'current_epoch': self.current_epoch,
             'optimizer_state': self.optimizer.state_dict() if self.optimizer else None,
+            'scheduler_state': self.scheduler.state_dict() if self.scheduler else None,
             'config': self.config.__dict__
         }
         torch.save(state, os.path.join(checkpoint_path, 'training_state.pt'))
@@ -744,21 +749,28 @@ class SimpleRLTrainer:
                     print(f"  Answer {i}: '{answer}'")
                     print(f"    Abstention score: {score.item():.4f}, Classified as abstention: {is_abstain.item()}")
 
-            # --- NEW REWARD STRUCTURE: Learn to abstain when uncertain ---
-            # Abstention = 0 (neutral), Wrong = amplified negative, Correct = factuality-based
+            # --- REWARD STRUCTURE: Balanced ---
+            # Fixed: Previous 225:1 penalty-to-reward ratio caused excessive abstention
+            #
+            # Current structure:
+            #   - Correct answer (f >= 0): +10.0 × factuality_reward
+            #   - Wrong answer (f < 0): -5.0 × factuality_reward
+            #   - Abstention: -1.0 (small penalty)
 
             # Initialize rewards
             rewards = torch.zeros_like(f)
 
-            # Penalty multiplier for wrong answers
-            WRONG_ANSWER_MULTIPLIER = 50.0  # Strong penalty to encourage exploration of abstention
+            # Reward/penalty multipliers
+            CORRECT_ANSWER_MULTIPLIER = 10.0  # Amplify correct answer rewards
+            WRONG_ANSWER_MULTIPLIER = 5.0     # Moderate penalty for wrong answers
+            ABSTENTION_PENALTY = -1.0         # Small penalty for abstention
 
             for i in range(len(rewards)):
                 model_abstained = abstained[i].item()
 
                 if model_abstained:
-                    # Abstention: neutral reward (0)
-                    rewards[i] = 0.0
+                    # Abstention: small penalty
+                    rewards[i] = ABSTENTION_PENALTY
                 else:
                     # Model answered: reward based on factuality
                     lambda_base = self.reward_model.lambda_base
@@ -766,11 +778,11 @@ class SimpleRLTrainer:
                     factuality_reward = f[i] * (lambda_base + lambda_conf * conf[i])
 
                     if factuality_reward < 0:
-                        # Wrong answer: amplify the penalty
+                        # Wrong answer: moderate penalty (5x instead of 50x)
                         rewards[i] = factuality_reward * WRONG_ANSWER_MULTIPLIER
                     else:
-                        # Correct answer: positive reward
-                        rewards[i] = factuality_reward
+                        # Correct answer: amplified reward (10x to encourage learning)
+                        rewards[i] = factuality_reward * CORRECT_ANSWER_MULTIPLIER
 
             # NO NORMALIZATION - keep raw rewards to preserve penalty magnitude
             # Store stats for logging
@@ -828,6 +840,11 @@ class SimpleRLTrainer:
             self.scaler.step(self.optimizer)
             self.scaler.update()
             self.optimizer.zero_grad()
+
+            # Step learning rate scheduler
+            if self.scheduler is not None:
+                self.scheduler.step()
+
             # Clear CUDA cache after optimizer step for better memory management
             torch.cuda.empty_cache()
 
@@ -882,6 +899,27 @@ class SimpleRLTrainer:
 
         checkpoint_interval = 1000  # Save checkpoint every 1000 steps
 
+        # Initialize learning rate scheduler if not already set
+        if self.scheduler is None and self.optimizer is not None:
+            # Calculate total training steps
+            steps_per_epoch = len(training_data) // self.config.batch_size
+            total_steps = steps_per_epoch * self.config.num_epochs
+            warmup_steps = int(0.1 * total_steps)  # 10% warmup
+
+            print(f"\nInitializing Learning Rate Scheduler:")
+            print(f"  Strategy: Warmup + Constant LR (better for noisy RLHF loss)")
+            print(f"  Total Steps: {total_steps}")
+            print(f"  Warmup Steps: {warmup_steps}")
+            print(f"  Target LR (after warmup): {self.config.learning_rate}")
+
+            # Use constant schedule with warmup (better for RLHF than cosine annealing)
+            # RLHF has high variance loss, so constant LR after warmup is more suitable
+            from transformers import get_constant_schedule_with_warmup
+            self.scheduler = get_constant_schedule_with_warmup(
+                self.optimizer,
+                num_warmup_steps=warmup_steps
+            )
+
         for epoch in range(self.config.num_epochs):
             self.current_epoch = epoch
             epoch_losses = []
@@ -929,7 +967,8 @@ class SimpleRLTrainer:
                 self.current_step = step
 
                 if step % 5 == 0:
-                    print(f"Epoch {epoch+1}/{self.config.num_epochs}, Step {step}")
+                    current_lr = self.scheduler.get_last_lr()[0] if self.scheduler else self.config.learning_rate
+                    print(f"Epoch {epoch+1}/{self.config.num_epochs}, Step {step}, LR: {current_lr:.2e}")
                     print(f"  Loss: {loss:.4f}, Reward: {mean_reward:.4f} (std: {extra_metrics['original_reward_std']:.4f})")
                     print(f"  Factuality: {extra_metrics['mean_factuality']:.4f}, "
                           f"Confidence: {extra_metrics['mean_confidence']:.4f}, "
@@ -1048,6 +1087,11 @@ class SimpleRLTrainer:
             # Load optimizer state if it exists
             if self.optimizer and state.get('optimizer_state'):
                 self.optimizer.load_state_dict(state['optimizer_state'])
+
+            # Load scheduler state if it exists
+            if self.scheduler and state.get('scheduler_state'):
+                self.scheduler.load_state_dict(state['scheduler_state'])
+                print(f"Scheduler state loaded")
 
             # Ensure model is in training mode with gradients enabled
             self.policy.train()
@@ -1327,19 +1371,19 @@ def main(resume_from_checkpoint=None):
         policy_model = resume_from_checkpoint
         print(f"\nResuming from checkpoint: {policy_model}")
     elif USE_FINETUNED_MODEL:
-        policy_model = "Qwen/Qwen2.5-7B-Instruct"  # Official Qwen base instruct model
+        policy_model = "fsiddiqui2/Qwen2.5-7B-Instruct-HotpotQA-Abstention-10000-80-20"  # Abstention finetuned model
     else:
         policy_model = "Qwen/Qwen2.5-7B"  # Base model (no instruction tuning)
 
     rl_config = SimpleRLConfig(
         policy_model_name=policy_model,
-        learning_rate=5e-7,        # ← Reduced from 1e-5
-        batch_size=8,              # ← Increased from 2 to 8 for better throughput
-        gradient_accumulation_steps=4,  # ← Effective batch size = 8 * 4 = 32
+        learning_rate=1e-5,        # Standard RLHF learning rate for LoRA
+        batch_size=8,              # Effective batch size = 8 * 4 = 32
+        gradient_accumulation_steps=4,
         num_epochs=1,
         max_new_tokens=20,
-        temperature=1.0,           # ← Using explicit prompting + 40% bootstrap instead of high temp
-        kl_penalty=0.0        # ← Set to 0.0 to disable reference policy and save ~11GB GPU memory
+        temperature=1.0,
+        kl_penalty=0.0        # Disabled to save GPU memory
     )
 
     # Initialize RL trainer
@@ -1356,60 +1400,20 @@ def main(resume_from_checkpoint=None):
     if resume_from_checkpoint:
         rl_trainer.load_checkpoint(resume_from_checkpoint)
 
-    # Load normal HotpotQA dataset (first 10,000 samples)
-    print("\nLoading normal HotpotQA training data (first 10,000 samples)...")
+    # Load HotpotQA dataset (samples 10000-20000 for fresh data)
+    print("\nLoading HotpotQA training data (samples 10000-20000)...")
     from datasets import load_dataset
 
     hotpotqa_dataset = load_dataset("hotpot_qa", "fullwiki", split="train")
-    hotpotqa_dataset = hotpotqa_dataset.select(range(10000))
-    print(f"Loaded {len(hotpotqa_dataset)} samples from normal HotpotQA")
+    hotpotqa_dataset = hotpotqa_dataset.select(range(10000, 20000))  # Using next 10k samples
+    print(f"Loaded {len(hotpotqa_dataset)} samples from HotpotQA (samples 10000-20000)")
+    print(f"Note: Not using pre-labeled abstention data. RLHF reward will guide abstention learning.")
 
-    # Load abstention dataset to get "I don't know" labels
-    print("Loading abstention dataset for labels...")
-    abstention_dataset = load_dataset("fsiddiqui2/hotpotqa-abstention-10k", split="train")
-    abstention_dataset = abstention_dataset.select(range(10000))
-    print(f"Loaded {len(abstention_dataset)} samples from abstention dataset")
-
-    # Debug: Check what fields the abstention dataset has
-    print("\nAbstention dataset fields:", abstention_dataset.column_names)
-    print("First abstention example:")
-    print(abstention_dataset[0])
-
-    # Verify that questions match between the two datasets
-    print("\nVerifying dataset alignment (checking first 100 samples)...")
-    mismatches = 0
-    sample_check_size = min(100, len(hotpotqa_dataset), len(abstention_dataset))
-
-    for i in range(sample_check_size):
-        hotpot_q = hotpotqa_dataset[i]['question'].strip()
-        abstention_q = abstention_dataset[i]['question'].strip()
-
-        if hotpot_q != abstention_q:
-            mismatches += 1
-            if mismatches <= 3:  # Print first 3 mismatches as examples
-                print(f"  Mismatch at index {i}:")
-                print(f"    HotpotQA: {hotpot_q[:80]}...")
-                print(f"    Abstention: {abstention_q[:80]}...")
-
-    if mismatches > 0:
-        mismatch_rate = (mismatches / sample_check_size) * 100
-        print(f"\n⚠️  WARNING: {mismatches}/{sample_check_size} questions don't match ({mismatch_rate:.1f}%)")
-        print(f"⚠️  The datasets may not be aligned!")
-        print(f"⚠️  This could lead to incorrect abstention labels being applied to wrong questions.")
-
-        # Ask user if they want to continue
-        user_input = input("\nContinue training anyway? (yes/no): ").strip().lower()
-        if user_input != "yes":
-            print("Training aborted by user.")
-            return
-    else:
-        print(f"✓ All {sample_check_size} checked questions match perfectly!")
-        print(f"✓ Datasets are properly aligned.")
-
-    # Create training data by combining HotpotQA questions with abstention labels
+    # Create training data from HotpotQA
+    # No abstention labels - let the reward function determine when to abstain
     training_data = []
-    for idx, (hotpot_example, abstention_example) in enumerate(zip(hotpotqa_dataset, abstention_dataset)):
-        # Get question and answer from normal HotpotQA
+    for idx, hotpot_example in enumerate(hotpotqa_dataset):
+        # Get question and answer from HotpotQA
         question = hotpot_example['question']
         hotpot_answer = hotpot_example['answer']
 
@@ -1423,16 +1427,15 @@ def main(resume_from_checkpoint=None):
             evidence_parts.append(f"{title}: {' '.join(sentences)}")
         evidence = "\n".join(evidence_parts)
 
-        # Get abstention label from abstention dataset
-        # was_correct=False means the model should abstain (short_target is "I don't know")
-        is_abstention_label = not abstention_example['was_correct']
+        # No abstention label - set to False (let RLHF reward determine abstention)
+        is_abstention_label = False
 
-        # Simple prompt for base model
-        prompt = f"""Question: {question}
-Answer:"""
+        # Match the prompt format used in finetuning (finetune_abstention.py)
+        # Uses "question ###\n" format to match the abstention-finetuned model
+        prompt = f"{question} ###\n"
 
         # Store as tuple: (prompt, hotpot_answer, evidence, is_abstention_label)
-        # is_abstention_label tells us if the model SHOULD abstain (from abstention dataset)
+        # is_abstention_label is False - reward function will guide abstention behavior
         training_data.append((prompt, hotpot_answer, evidence, is_abstention_label))
 
     # Count abstention labels for statistics

@@ -1,0 +1,14 @@
+{
+  "model": "checkpoints/checkpoint_epoch_0_step_9992",
+  "dataset": "hotpot_qa",
+  "subset": "distractor",
+  "split": "validation",
+  "samples": 7405,
+  "EM": 61.539500337609724,
+  "F1": 67.41304218484744,
+  "Avg_RAUQ": 1.4034544123418422,
+  "Abstention_Rate": 41.174881836596896,
+  "Non_Abstained_EM": 34.61891643709826,
+  "Non_Abstained_F1": 44.60366790146816,
+  "Non_Abstained_Count": 4356
+}

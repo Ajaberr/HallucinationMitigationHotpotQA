@@ -14,7 +14,7 @@ import numpy as np
 # 1. Configuration
 # ==========================================
 
-MODEL_ID = "fsiddiqui2/Qwen2.5-7B-Instruct-HotpotQA-Abstention-10000-80-20"
+MODEL_ID = "jxrma/Qwen2.5-7B-Instruct-RLHF-Abstention-Final"
 DATASET_NAME = "hotpot_qa"
 SUBSET_NAME = "distractor"
 SPLIT = "validation"

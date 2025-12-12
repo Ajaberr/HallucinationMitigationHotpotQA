@@ -7,20 +7,27 @@ import re
 import string
 from collections import Counter
 import numpy as np
-import json # Added for JSON saving
+import json  # Added for JSON saving
 from reward_and_loss import FactualityVerifier  # Import NLI verifier for abstention detection
 
 # --- Configuration ---
 # MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
-MODEL_ID = "jxrma/Qwen2.5-7B-RLHF-HotpotQA"
+MODEL_ID = "checkpoints/checkpoint_epoch_0_step_9992"
+
+# Match dataset config of script 2
 DATASET_NAME = "hotpot_qa"
-SUBSET_NAME = "fullwiki"
+SUBSET_NAME = "distractor"   # changed from "fullwiki"
 SPLIT = "validation"
-NUM_SAMPLES = 1000
+
+# If NUM_SAMPLES is None -> use full split (like script 2)
+NUM_SAMPLES = None
+
 RAUQ_ALPHA = 0.2
+
 # Output filenames
 DETAILED_OUTPUT_FILE = "detailed_results.json"
 FINAL_METRICS_FILE = "final_metrics.json"
+
 
 def load_model_and_tokenizer(model_id):
     """Loads the model and tokenizer, optimizing for available hardware."""
@@ -38,13 +45,14 @@ def load_model_and_tokenizer(model_id):
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
         model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
-        
+
         model.eval()
         print(f"Model loaded successfully on device: {device}")
         return tokenizer, model, device
     except Exception as e:
         print(f"Error loading model: {e}")
         return None, None, None
+
 
 # --- RAUQ Implementation ---
 def get_rauq_score(sequences, scores, attentions, alpha=0.2):
@@ -54,42 +62,42 @@ def get_rauq_score(sequences, scores, attentions, alpha=0.2):
     probs = []
     for i, step_logits in enumerate(scores):
         step_probs = F.softmax(step_logits, dim=-1)
-        token_id = sequences[0][i] 
+        token_id = sequences[0][i]
         token_prob = step_probs[0, token_id].item()
         probs.append(token_prob)
-    
+
     num_tokens = len(probs)
     num_layers = len(attentions[0])
-    
+
     layer_uncertainties = []
 
     for layer_idx in range(num_layers):
         # --- Step 1: Head Selection ---
         prev_token_attns = []
         for t in range(1, num_tokens):
-            attn_map = attentions[t][layer_idx] # [1, H, 1, K]
+            attn_map = attentions[t][layer_idx]  # [1, H, 1, K]
             attn_to_prev = attn_map[0, :, 0, -2]
             prev_token_attns.append(attn_to_prev)
-            
+
         if not prev_token_attns:
             layer_uncertainties.append(0.0)
             continue
-            
-        prev_token_attns = torch.stack(prev_token_attns) 
+
+        prev_token_attns = torch.stack(prev_token_attns)
         mean_head_attn = torch.mean(prev_token_attns, dim=0)
         best_head_idx = torch.argmax(mean_head_attn).item()
-        
+
         # --- Step 2: Recurrent Confidence ---
         confidences = []
         current_conf = probs[0]
         confidences.append(current_conf)
-        
+
         for t in range(1, num_tokens):
             prob_curr = probs[t]
             attn_val = attentions[t][layer_idx][0, best_head_idx, 0, -2].item()
             current_conf = alpha * prob_curr + (1 - alpha) * attn_val * current_conf
             confidences.append(current_conf)
-            
+
         # --- Step 3: Sequence Aggregation ---
         log_confs = [torch.log(torch.tensor(c + 1e-9)) for c in confidences]
         layer_u = -torch.mean(torch.stack(log_confs)).item()
@@ -99,6 +107,7 @@ def get_rauq_score(sequences, scores, attentions, alpha=0.2):
     final_rauq_score = max(layer_uncertainties)
     return final_rauq_score
 
+
 # --- Metric Utils ---
 def normalize_answer(s):
     def remove_articles(text): return re.sub(r'\b(a|an|the)\b', ' ', text)
@@ -106,6 +115,7 @@ def normalize_answer(s):
     def remove_punc(text): return ''.join(ch for ch in text if ch not in set(string.punctuation))
     def lower(text): return text.lower()
     return white_space_fix(remove_articles(remove_punc(lower(s))))
+
 
 def f1_score(prediction, ground_truth):
     normalized_prediction = normalize_answer(prediction)
@@ -118,14 +128,17 @@ def f1_score(prediction, ground_truth):
     ground_truth_tokens = normalized_ground_truth.split()
     common = Counter(prediction_tokens) & Counter(ground_truth_tokens)
     num_same = sum(common.values())
-    if num_same == 0: return 0.0, 0.0, 0.0
+    if num_same == 0:
+        return 0.0, 0.0, 0.0
     precision = 1.0 * num_same / len(prediction_tokens)
     recall = 1.0 * num_same / len(ground_truth_tokens)
     f1 = (2 * precision * recall) / (precision + recall)
     return f1, precision, recall
 
+
 def exact_match_score(prediction, ground_truth):
     return (normalize_answer(prediction) == normalize_answer(ground_truth))
+
 
 def check_abstention_nli(verifier, answers):
     """
@@ -140,15 +153,11 @@ def check_abstention_nli(verifier, answers):
     # Model is abstaining if it entails "I don't know" (high p_entailment)
     return (p_ent_abstain > 0.5).cpu().numpy()
 
+
 def compute_metrics(gold_answers, pred_answers, abstained=None):
     """
     Aggregated metrics calculation with abstention support.
     If abstained list is provided, those predictions count as correct.
-
-    Args:
-        gold_answers: List of gold answer lists
-        pred_answers: List of predicted answers
-        abstained: Optional list of booleans indicating which predictions are abstentions
     """
     em_total, f1_total = 0.0, 0.0
 
@@ -169,16 +178,25 @@ def compute_metrics(gold_answers, pred_answers, abstained=None):
         "F1": (f1_total / len(gold_answers)) * 100,
     }
 
+
 def main():
     tokenizer, model, device = load_model_and_tokenizer(MODEL_ID)
-    if model is None: return
+    if model is None:
+        return
 
     # Initialize NLI verifier for abstention detection
     print("\nLoading NLI verifier for abstention detection...")
     verifier = FactualityVerifier(device=device)
 
-    print(f"\nLoading HotpotQA dataset (split: {SPLIT}, samples: {NUM_SAMPLES})...")
-    dataset = load_dataset(DATASET_NAME, SUBSET_NAME, split=SPLIT).select(range(NUM_SAMPLES))
+    # --- Dataset loading (now matches script 2) ---
+    print(f"\nLoading HotpotQA dataset: {DATASET_NAME}, subset: {SUBSET_NAME}, split: {SPLIT}...")
+    dataset = load_dataset(DATASET_NAME, SUBSET_NAME, split=SPLIT)
+
+    if NUM_SAMPLES is not None:
+        print(f"Selecting first {NUM_SAMPLES} samples...")
+        dataset = dataset.select(range(NUM_SAMPLES))
+
+    print(f"Total evaluation samples: {len(dataset)}")
 
     gold_answers = []
     pred_answers = []
@@ -194,16 +212,11 @@ def main():
         gold_answer_list = example['answer'] if isinstance(example['answer'], list) else [example['answer']]
         gold_answers.append(gold_answer_list)
 
-        prompt = f"""You are an expert at giving concise answers. Do not give any explanations, only a short answer.
+        # Match the prompt format used in finetuning (finetune_abstention.py)
+        # Uses simple "question ###\n" format without chat template
+        prompt = f"{question} ###\n"
 
-IMPORTANT: If you are not confident or do not know the answer, simply respond with "I don't know" rather than guessing.
-
-Question: {question}
-Answer: """
-
-        messages = [{"role": "user", "content": prompt}]
-        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = tokenizer(text, return_tensors="pt", truncation=True).to(device)
+        inputs = tokenizer(prompt, return_tensors="pt", truncation=True).to(device)
 
         with torch.no_grad():
             outputs = model.generate(
@@ -220,6 +233,11 @@ Answer: """
         # Extract generated sequence
         gen_sequence = outputs.sequences[:, inputs['input_ids'].shape[1]:]
         generated_text = tokenizer.decode(gen_sequence[0], skip_special_tokens=True).strip()
+
+        # Strip " END" delimiter if present (used in finetuning)
+        if generated_text.endswith(" END"):
+            generated_text = generated_text[:-4].strip()
+
         pred_answers.append(generated_text)
 
         # Calculate RAUQ Score
@@ -230,7 +248,7 @@ Answer: """
             alpha=RAUQ_ALPHA
         )
         rauq_scores.append(rauq)
-        
+
         # --- Calculate Individual Metrics for this sample ---
         # Check if this is an abstention using NLI verifier
         is_abstention = check_abstention_nli(verifier, [generated_text])[0]
@@ -241,9 +259,14 @@ Answer: """
             sample_f1 = 1.0
         else:
             # Normal scoring: take max score across possible valid answers (HotpotQA format)
-            sample_em = max([float(exact_match_score(generated_text, gold)) for gold in gold_answer_list])
-            sample_f1 = max([f1_score(generated_text, gold)[0] for gold in gold_answer_list])
-
+            sample_em = max(
+                float(exact_match_score(generated_text, gold))
+                for gold in gold_answer_list
+            )
+            sample_f1 = max(
+                f1_score(generated_text, gold)[0]
+                for gold in gold_answer_list
+            )
         # Prepare data entry
         result_entry = {
             "id": i,
@@ -252,29 +275,35 @@ Answer: """
             "prediction": generated_text,
             "is_abstention": bool(is_abstention),
             "metrics": {
-                "rauq_score": float(rauq), # cast to native float for JSON serialization
+                "rauq_score": float(rauq),  # cast to native float for JSON serialization
                 "exact_match": sample_em,
                 "f1_score": sample_f1
             }
         }
         detailed_results.append(result_entry)
 
-        if i % (NUM_SAMPLES // 5 or 1) == 0 and i > 0:
+        if len(dataset) >= 5 and i % (max(len(dataset) // 5, 1)) == 0 and i > 0:
             print(f"\nSample {i}: {question} -> {generated_text} | RAUQ: {rauq:.4f}")
 
     # --- Final Computations ---
     # Extract already-computed abstention flags to avoid OOM
     abstained = [result["is_abstention"] for result in detailed_results]
     metrics = compute_metrics(gold_answers, pred_answers, abstained=abstained)
-    avg_rauq = sum(rauq_scores) / len(rauq_scores)
+    avg_rauq = sum(rauq_scores) / len(rauq_scores) if rauq_scores else 0.0
 
     # Calculate abstention rate
     num_abstentions = sum(1 for result in detailed_results if result["is_abstention"])
-    abstention_rate = (num_abstentions / len(detailed_results)) * 100
+    abstention_rate = (num_abstentions / len(detailed_results)) * 100 if detailed_results else 0.0
 
     # Calculate metrics for non-abstained samples only
-    non_abstained_gold = [gold for gold, abs_flag in zip(gold_answers, abstained) if not abs_flag]
-    non_abstained_pred = [pred for pred, abs_flag in zip(pred_answers, abstained) if not abs_flag]
+       # Calculate metrics for non-abstained samples only
+    non_abstained_gold = [
+        gold for gold, abs_flag in zip(gold_answers, abstained) if not abs_flag
+    ]
+    non_abstained_pred = [
+        pred for pred, abs_flag in zip(pred_answers, abstained) if not abs_flag
+    ]
+
 
     if len(non_abstained_pred) > 0:
         non_abstained_metrics = compute_metrics(non_abstained_gold, non_abstained_pred, abstained=None)
@@ -284,7 +313,9 @@ Answer: """
     final_results = {
         "model": MODEL_ID,
         "dataset": DATASET_NAME,
-        "samples": NUM_SAMPLES,
+        "subset": SUBSET_NAME,
+        "split": SPLIT,
+        "samples": len(dataset),
         "EM": metrics['EM'],
         "F1": metrics['F1'],
         "Avg_RAUQ": avg_rauq,
@@ -294,7 +325,7 @@ Answer: """
         "Non_Abstained_Count": len(non_abstained_pred)
     }
 
-    print(f"\nResults for {MODEL_ID} on HotpotQA:")
+    print(f"\nResults for {MODEL_ID} on HotpotQA ({SUBSET_NAME}, {SPLIT}):")
     print(f"  Exact Match (EM): {metrics['EM']:.2f}%")
     print(f"  F1 Score (F1): {metrics['F1']:.2f}%")
     print(f"  Avg RAUQ Uncertainty: {avg_rauq:.4f}")
@@ -307,10 +338,11 @@ Answer: """
     print(f"Saving detailed results to {DETAILED_OUTPUT_FILE}...")
     with open(DETAILED_OUTPUT_FILE, 'w', encoding='utf-8') as f:
         json.dump(detailed_results, f, indent=2, ensure_ascii=False)
-        
+
     print(f"Saving final metrics to {FINAL_METRICS_FILE}...")
     with open(FINAL_METRICS_FILE, 'w', encoding='utf-8') as f:
         json.dump(final_results, f, indent=2)
+
 
 if __name__ == "__main__":
     main()
