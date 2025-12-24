@@ -264,7 +264,7 @@ Gold: "Continental Army"
 
 - **Josh Hegstad**: Training and evaluation of Tinker models, analysis thereof
 - **Farhaan Siddiqui**: Training and evaluation of fine-tuned models (SFT, FCoT, Abstention), dataset generation, reasoning trace analysis
-- **Ahmed Jaber**: [TBD]
+- **Ahmed Jaber**: Implementation of Reward Learning (RLVF) training and evaluation pipeline, development of NLI-verifier and abstention classification, analysis of abstention behavior
 
 ## License
 
