@@ -118,7 +118,13 @@ High entropy indicates the model is uncertain and likely to hallucinate.
 
 The supervised model (Qwen2.5-Abstain) achieves **97.49% precision** against the base model, meaning its abstentions are almost invariably justified. The RLVF model maintains high precision (97.84%) while increasing coverage.
 
-![Abstention Confusion Matrices](./images/abstention_comparison.png)
+### Abstention Confusion Matrices
+
+**Supervised Fine-Tuning (SFT) Model:**
+![Abstention SFT Confusion Matrices](./images/abstention_confusion_matrices_SFT.png)
+
+**RLHF Model:**
+![RLHF Confusion Matrices](./images/rlhf_confusion_matrices.png)
 
 ### Semantic Entropy Analysis
 
@@ -126,7 +132,13 @@ The supervised model (Qwen2.5-Abstain) achieves **97.49% precision** against the
 - **Incorrect answers**: Median SE ≈ 0.9 (high uncertainty)
 - **Rejection at 50%**: Consensus strategy achieves Selective F1 of 0.69 (up from 0.50 at 0% rejection)
 
-![RAUQ Rejection Curves](./images/rauq_comparison.png)
+### RAUQ Rejection Curves
+
+**Vanilla Qwen2.5-7B:**
+![RAUQ Rejection Curve - Vanilla](./images/rauq_rejection_curve_vanilla.png)
+
+**Fine-tuned Model:**
+![RAUQ Rejection Curve - Finetuned](./images/rauq_rejection_curve_finetuned.png)
 
 ## Dataset
 
