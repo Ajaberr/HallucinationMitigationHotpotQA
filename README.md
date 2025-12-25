@@ -288,9 +288,11 @@ Gold: "Continental Army"
 
 ## Team Contributions
 
-- **Josh Hegstad**: Training and evaluation of Tinker models, analysis thereof
-- **Farhaan Siddiqui**: Training and evaluation of fine-tuned models (SFT, FCoT, Abstention), dataset generation, reasoning trace analysis
-- **Ahmed Jaber**: Implementation of Reward Learning (RLVF) training and evaluation pipeline, development of NLI-verifier and abstention classification, analysis of abstention behavior
+Joshua wrote the code for training and evaluating the Tinker models and running semantic entropy evaluations, and wrote all analysis thereof.
+
+Farhaan wrote code for training and evaluating the Qwen2.5 finetuned models, including generating the CoT and Abstention datasets and analyzing the reasoning traces.
+
+Ahmed implemented the Reward Learning (RLVF) training and evaluation pipeline, developed the NLI-verifier and Abstention classification, and analyzed the abstention behavior.
 
 ## License
 
