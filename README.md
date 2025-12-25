@@ -1,9 +1,10 @@
-# Hallucination Mitigation in Closed-Book Question Answering
+# A Reasonable Approach to Hallucination Mitigation on HotPotQA
 
 **Columbia COMS4705 Final Project**
 
 **Authors:** Joshua Hegstad, Ahmed Jaber, Farhaan Siddiqui
 **Mentor:** Melody Ma
+**Keywords:** hallucination, Q&A, reinforcement learning, decoding, abstention
 
 ## Abstract
 
@@ -12,7 +13,9 @@ Closed-book question answering (QA) systems must answer questions using only par
 1. **No Knowledge**: The model lacks the relevant knowledge
 2. **Cannot Access Knowledge**: The knowledge is implicitly present in its parameters, but the model does not reliably retrieve or apply it at inference time
 
-We study these failure modes on HotPotQA using Qwen2.5-Instruct-7B and propose a two-part mitigation pipeline combining Chain-of-Thought (CoT) distillation and abstention-aware fine-tuning with reinforcement learning.
+We study these failure modes on HotPotQA using Qwen2.5-7B and Qwen3-8B and propose a three-stage mitigation pipeline.
+
+To address the "cannot access knowledge" case, we perform Chain-of-Thought (CoT) distillation from a larger Qwen3-235B teacher to unlock latent parametric knowledge. To address the "no knowledge" case, we train the model to abstain by replacing incorrect predictions with "I don't know" and finetuning on a class-balanced mix of correct answers and abstentions. Finally, we apply Reinforcement Learning from Verifier Feedback (RLVF) with an NLI-derived factuality score to heavily penalize confident errors. On HotPotQA, this pipeline reduces hallucinated responses and increases appropriate refusals. Furthermore, we demonstrate that unsupervised Semantic Entropy (SE) effectively flags residual hallucinations, enabling a consensus-based rejection strategy that improves selective F1 score from 0.50 to 0.70.
 
 ## Key Results
 
@@ -57,33 +60,49 @@ To mitigate the "no knowledge" failure mode, we teach the model to explicitly ou
 
 ### 3. Reinforcement Learning from Verifier Feedback (RLVF)
 
-We refine abstention behavior using policy gradient RL with a multi-component reward function:
+To refine the abstention boundary learned during supervised fine-tuning, we train the Qwen2.5-Abstain model with policy-gradient RL using a reward signal derived entirely from verifier factuality and model confidence.
 
+**Verifier Architecture:** Although inference is closed-book, the reward model is not. The **FactualityVerifier**—a DeBERTa-based NLI model—receives the full HotPotQA supporting paragraphs. For each example, we concatenate all supporting titles and sentences into a single premise and compute:
+- p_ent: Entailment probability
+- p_cont: Contradiction probability
+- f = p_ent - p_cont: Grounded factuality score
+
+Thus RLVF optimizes semantic factuality rather than gold-label EM.
+
+**Confidence Term:** We include a normalized entropy confidence score:
 ```
-R(x, ŷ, y) = {
-  +10.0  if EM(ŷ, y) = 1          (Correct Answer)
-   -5.0  if ŷ ≠ y and ŷ ≠ "IDK"   (Hallucination)
-   -1.0  if ŷ = "I don't know"     (Abstention Cost)
+conf = 1 - (H_avg / H_max)
+```
+
+**Abstention Detection:** Abstentions are not identified via string matching. Instead, the **AbstentionClassifier** applies the same NLI verifier to check whether the model's answer entails an abstention-style statement (e.g., "I don't know"). If so, the model receives a fixed penalty of -1.0.
+
+**Reward Function:** For non-abstaining outputs, reward depends solely on verifier factuality and confidence:
+```
+R = {
+  10 × f × (λ_base + λ_conf × conf)   if f ≥ 0
+  5 × f × (λ_base + λ_conf × conf)    if f < 0
 }
 ```
 
-This creates a natural hierarchy: correct answers are strongly rewarded, hallucinations are heavily penalized, and abstentions incur a small penalty to prevent over-conservatism.
-
-**Verifier Architecture:** We use an NLI-based factuality verifier that computes:
-- p_entail: Probability that answer is entailed by question context
-- p_contradict: Probability that answer contradicts known information
-- Factuality score: f = p_entail - p_contradict
+Positive factuality is up-weighted (10×), negative factuality down-weighted (5×).
 
 ### 4. Uncertainty Quantification with Semantic Entropy
 
-We implement Discrete Semantic Entropy (SE) to detect hallucinations at inference time:
+To estimate SE without access to token probabilities, we sample M=10 stochastic generations per question and cluster them based on semantic equivalence using a bidirectional NLI entailment model (microsoft/deberta-large-mnli). The probability of each semantic cluster C is approximated via Monte Carlo integration:
 
-1. Sample M=10 stochastic generations per question
-2. Cluster them based on semantic equivalence using DeBERTa-large-MNLI
-3. Compute cluster probabilities via Monte Carlo integration
-4. Calculate entropy over semantic clusters: H(x) = -Σ P(C|x) log P(C|x)
+```
+P(C|x) ≈ (1/M) Σ I(s_i ∈ C)
+```
 
-High entropy indicates the model is uncertain and likely to hallucinate.
+The total uncertainty is then given by the entropy over these semantic clusters:
+
+```
+H(x) = -Σ P(C|x) log P(C|x)
+```
+
+This metric serves as our primary signal for evaluating the efficacy of our abstention mechanism in calculating and rejecting hallucinations.
+
+We also examined both **Standard Semantic Entropy (Std SE)**, which measures total uncertainty over all clusters, and **Conditional Semantic Entropy (Cond SE)**, which normalizes uncertainty by ignoring the probability mass assigned to the "I don't know" cluster.
 
 ## Models
 
@@ -109,7 +128,7 @@ High entropy indicates the model is uncertain and likely to hallucinate.
 
 | Model | EM | F1 | Abs. Rate | Selective EM | Selective F1 |
 |-------|----|----|-----------|--------------|--------------|
-| Qwen2.5-Abstain | 20.37% | 26.04% | 46.34% | **37.98%** | **48.46%** |
+| Qwen2.5-Abstain | 19.47% | 25.78% | 46.34% | **37.98%** | **48.46%** |
 | Qwen2.5-RLVF | 20.37% | 26.24% | **41.17%** | 34.62% | 44.60% |
 
 **Key Insight:** The supervised abstention model achieves higher selective accuracy (37.98% vs 34.62%) but lower coverage (53.65% vs 58.83%). RLVF trades some selective accuracy for increased answer rate.
@@ -146,9 +165,9 @@ We use the **HotPotQA distractor dataset** in a strictly closed-book setting (al
 
 ### Training Datasets
 
-- **Dataset A**: 10,000 Q&A pairs from HotPotQA (train split)
-- **Dataset B**: 10,000 Q&A pairs with CoT reasoning traces generated by Qwen3-235B
-- **Dataset C**: 10,000 Q&A/abstention pairs (80/20 split) based on model's knowledge boundary
+- **Dataset A1/A2**: The first and second 10,000 question-answer pairs of HotPotQA (distractor setting, train split), respectively
+- **Dataset B**: 10,000 Q&A pairs with CoT reasoning traces generated by Qwen3-235B according to our "Finetune-CoT" approach
+- **Dataset C**: 10,000 Q&A/abstention pairs (80/20 split) from the first 40,000 samples of HotPotQA based on model's knowledge boundary
 
 ## Training Configuration
 
@@ -159,10 +178,17 @@ We use the **HotPotQA distractor dataset** in a strictly closed-book setting (al
 - **Quantization**: 4-bit NF4 with double quantization
 
 ### Optimization
-- **Optimizer**: AdamW
-- **Learning rate**: 2e-4 (SFT), 1e-5 (RLVF)
+- **Optimizer**: AdamW (adamw_torch)
+- **Learning rate**: 2e-4 (SFT, FCoT, Abstain), 1e-5 (RLVF)
 - **Scheduler**: Cosine with 3% warmup
 - **Batch size**: Effective batch size of 16 (4 per device × 4 gradient accumulation)
+- **Training duration**: 1 epoch for all models
+
+### Training Data Assignment
+- **Qwen2.5-SFT**: Trained on Dataset A1
+- **Qwen2.5-FCoT**: Trained on Dataset B
+- **Qwen2.5-Abstain**: Trained on Dataset C
+- **Qwen2.5-RLVF**: Initialized from Qwen2.5-Abstain checkpoint, trained on Dataset A2 with on-policy generation
 
 ### Inference
 - **Decoding**: Greedy (deterministic)
